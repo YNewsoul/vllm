@@ -89,6 +89,7 @@ class SLAOptimizer:
         
         try:
             # 限制搜索范围以确保实时性
+            # batch 不超过 running 队列 + waiting队列 长度
             batch_search_limit = len(running_requests) + len(waiting_requests)
             min_batch_size = max(1, len(running_requests))
             
@@ -364,12 +365,15 @@ class SLAOptimizer:
         """
         # 基于队列长度的线性插值
         if self.config.queue_threshold > 0:
+            # k = (50 - 15)/5 = 7
             k = (self.config.slo_tpot_ms - self.config.min_batch_time_ms) / self.config.queue_threshold
+            # target = 15 + 7 * queue_length
             target = self.config.min_batch_time_ms + k * queue_length
         else:
             target = self.config.min_batch_time_ms
         
         # 确保有效下界：至少能处理1个token
+        # min_effective = max(15, 8.7 + 0.0215) = 15
         min_effective = max(
             self.config.min_batch_time_ms,
             self.predictor.fallback_intercept + self.predictor.fallback_slope

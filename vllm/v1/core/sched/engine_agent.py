@@ -103,7 +103,7 @@ class EngineAgent:
 
     def _init_from_env(self):
         """从环境变量初始化"""
-        self.enabled = os.getenv('VLLM_ENABLE_ELRAR', 'true').lower() == 'true'
+        self.enabled = os.getenv('VLLM_ENABLE_ELRAR', 'false').lower() == 'true'
         self.network_mode = os.getenv('VLLM_ELRAR_NETWORK_MODE', 'unicast')
         self.gateway_host = os.getenv('VLLM_ELRAR_GATEWAY_HOST')
         self.gateway_port = int(os.getenv('VLLM_ELRAR_GATEWAY_PORT', '9999'))
