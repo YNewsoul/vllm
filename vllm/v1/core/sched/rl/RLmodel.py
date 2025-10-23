@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 import logging
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 class MLPNetwork(nn.Module):
     """

@@ -8,10 +8,12 @@ import random
 import time
 from typing import Dict
 
-from config import RLSchedulerConfig
-from RLmodel import MLPNetwork
+from vllm.logger import init_logger
 
-logger = logging.getLogger(__name__)
+from .RLConfig import RLSchedulerConfig
+from .RLmodel import MLPNetwork
+
+logger = init_logger(__name__)
 
 class RLAgent:
     """
@@ -193,7 +195,6 @@ class RLAgent:
             reward = rewards.mean().detach().item()
             # 打印监控信息
             logger.info(f"value_loss: {value_loss:.4f}, q_value: {q_value:.4f}, reward: {reward:.4f}")
-            print(f"value_loss: {value_loss:.4f}, q_value: {q_value:.4f}, reward: {reward:.4f}")
             self.last_report_monitor_time = now
         
         return loss.item()
@@ -232,8 +233,8 @@ class RLAgent:
         
         num_runing = len(env_info["running_requests"])
         num_waiting = len(env_info["waiting_requests"])
-        running_ratio = num_runing / (num_runing + num_waiting)
-        waiting_ratio = num_waiting / (num_runing + num_waiting)
+        running_ratio = num_runing / (num_runing + num_waiting) if (num_runing + num_waiting) > 0 else 0.0
+        waiting_ratio = num_waiting / (num_runing + num_waiting) if (num_runing + num_waiting) > 0 else 0.0
     
         state_vec = np.array([
             num_runing,

@@ -1,13 +1,14 @@
 import time
 from typing import List, Dict, Tuple, Optional, Any
-import logging
 import sys
 import os
 from dataclasses import dataclass
 
-from config import RLSchedulerConfig
+from vllm.logger import init_logger
 
-logger = logging.getLogger(__name__)
+from .RLConfig import RLSchedulerConfig
+
+logger = init_logger(__name__)
 
 
 @dataclass

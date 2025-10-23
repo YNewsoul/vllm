@@ -2,7 +2,9 @@ import os
 from dataclasses import dataclass
 import logging
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 @dataclass
 class RLSchedulerConfig:

@@ -4,10 +4,12 @@ import random
 from collections import deque
 
 
-from config import RLSchedulerConfig
-from RLAgent import RLAgent
+from vllm.logger import init_logger
 
-logger = logging.getLogger(__name__)
+from .RLConfig import RLSchedulerConfig
+from .RLAgent import RLAgent
+
+logger = init_logger(__name__)
 
 class Trainer:
     def __init__(self,rl_agent:RLAgent):
@@ -29,9 +31,8 @@ class Trainer:
                     for episode in range(self.max_episodes):
                         batch = self.sample_exp(self.config.train_batch_size)
                         self.rl_agent.learn(batch)
-                    print("进行完一次迭代，保存模型")
                     self.rl_agent.save_model()
-                    logger.info(f"完成 {self.max_episodes} 轮模型训练")
+                    logger.info(f"Finished the {self.max_episodes} round of model training and save the model")
                 except Exception as e:
                     logger.error(f"Failed to train episode {episode}: {str(e)}")
                 finally:
@@ -48,12 +49,11 @@ class Trainer:
         if (len(self.rl_replay_buffer) >= self.config.train_batch_size and 
             not self.is_training):
             
-            print("start train...........")
             logger.info(f"start train ..........")
             # 创建并启动训练线程
             train_thread = threading.Thread(target=self._train_in_thread, daemon=True)
             train_thread.start()
-            logger.info(f"启动异步训练线程，当前经验池大小: {len(self.rl_replay_buffer)}")
+            logger.info(f"Start the asynchronous training thread and determine the current size of the experience pool: {len(self.rl_replay_buffer)}")
 
     def sample_exp(self, batch_size: int):
         """从回放池采样经验（每个经验对应一轮迭代的交互）"""

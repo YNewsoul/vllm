@@ -6,15 +6,16 @@
 
 import time
 from typing import Optional, Dict, Any, List, Tuple
-import logging
 
-from config import RLSchedulerConfig
-from RLAgent import RLAgent
-from RLOptimizer import RLOptimizer
-from Trainer import Trainer
-from Env import Env
+from .RLConfig import RLSchedulerConfig
+from .RLAgent import RLAgent
+from .RLOptimizer import RLOptimizer
+from .Trainer import Trainer
+from .Env import Env
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class RLScheduler:
@@ -157,33 +158,6 @@ class RLScheduler:
         
         logger.info("SLA Scheduler reset")
     
-    # def _is_decode_phase(self, request: Request) -> bool:
-    #     """判断请求是否处于decode阶段"""
-    #     try:
-    #         return request.num_computed_tokens >= request.num_prompt_tokens
-    #     except AttributeError:
-    #         return False
-    
-    # def _fallback_schedule_decision(self, max_tokens: int, max_batch_size: int) -> Dict[str, Any]:
-    #     """后备调度决策方案"""
-    #     self.stats['fallback_count'] += 1
-        
-    #     # 使用保守的默认值
-    #     token_budget = max_tokens
-    #     target_latency = self.config.slo_tpot_ms
-        
-    #     # 创建简单的分配（所有请求平均分配token）
-    #     allocation = {}
-        
-    #     if self.config.verbose_logging:
-    #         logger.info(f"Using fallback schedule: {token_budget} tokens, {target_latency}ms")
-        
-    #     return {
-    #         'allocation': allocation,
-    #         'token_budget': token_budget,
-    #         'target_latency': target_latency,
-    #         'prioritize_decode': False
-    #     }
     
     def _update_optimization_time_stats(self, optimization_time_ms: float) -> None:
         """更新优化时间统计"""
@@ -233,5 +207,5 @@ class RLScheduler:
             self.env.set_after_env_info(env_info)
             before_env_info, after_env_info = self.env.get_env_info()
             self.trainer.add_exp(before_env_info, after_env_info, self.rl_agent.action)
-
+            
         self.stats['total_performance_records'] += 1

@@ -224,8 +224,6 @@ class Scheduler(SchedulerInterface):
             except Exception as e:
                 logger.warning(f"SLA Scheduler initialization failed: {e}")
                 self.sla_scheduler = None
-        else:
-            logger.info("SLA Scheduler not available, using legacy load-aware scheduling")
 
         # 初始化 RL 调度
         self.rl_scheduler = None
@@ -236,8 +234,6 @@ class Scheduler(SchedulerInterface):
             except Exception as e:
                 logger.warning(f"RL Scheduler initialization failed: {e}")
                 self.rl_scheduler = None
-        else:
-            logger.info("RL Scheduler not available, using legacy load-aware scheduling")
 
         # 初始化ELRAR Engine Agent
         self.elrar_agent = None
@@ -319,11 +315,14 @@ class Scheduler(SchedulerInterface):
         # 使用 RL 调度器
         if self.rl_scheduler and self.rl_scheduler.enabled:
             # 获取完整的RL调度决策
+            self.rl_env_info = None
             self.rl_env_info = {'running_requests': list(self.running),
                         'waiting_requests': list(self.waiting),}
             
             rl_schedule_decision = self.rl_scheduler.compute_schedule_decision(self.rl_env_info)
-            
+            print("============================================================")
+            print(f"RL Scheduler decision: {rl_schedule_decision}")
+            logger.info(f"RL Scheduler decision: {rl_schedule_decision}")
             if rl_schedule_decision:
                 # 从RL决策中提取token预算和是否优先decode阶段
                 token_budget = rl_schedule_decision['token_budget']
@@ -1493,7 +1492,7 @@ class Scheduler(SchedulerInterface):
             avg_cached_tokens = total_cached_tokens / len(cached_tokens) if cached_tokens else 0
             
             logger.info(f"[SCHEDULER_PROFILING] Batch {data['batch_id']}: "
-                       f"Prefill={data['num_prefill_reqs']}, Decode={data['num_decode_reqs']}, "
+                       f"running={data['num_running_reqs']}, waiting={data['num_waiting_reqs']}, "
                        f"Schedule={data['schedule_duration_ms']:.2f}ms, "
                        f"ModelRun={data['model_run_duration_ms']:.2f}ms, "
                        f"TotalTokens={data['total_scheduled_tokens']}, "

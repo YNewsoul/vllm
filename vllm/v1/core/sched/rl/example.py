@@ -10,8 +10,8 @@ import time
 import sys
 from typing import List, Dict, Any
 
-from config import RLSchedulerConfig
-from RLScheduler import RLScheduler
+from .RLConfig import RLSchedulerConfig
+from .RLScheduler import RLScheduler
 
 # 设置示例配置
 def setup_example_config():
