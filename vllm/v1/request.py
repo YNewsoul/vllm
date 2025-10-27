@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import time
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -83,6 +84,17 @@ class Request:
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
 
+        # 添加额外的属性
+        self.arrival_time = time.monotonic()
+        if self.num_prompt_tokens < 3000:
+            self.slo = 10.0  # 10秒SLO
+        elif self.num_prompt_tokens < 6000:
+            self.slo = 20.0  # 20秒SLO
+        elif self.num_prompt_tokens < 10000:
+            self.slo = 30.0  # 30秒SLO
+        else:
+            self.slo = None
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         if request.mm_inputs is not None:
@@ -103,6 +115,7 @@ class Request:
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
             cache_salt=request.cache_salt,
+             arrival_time=time.monotonic(),  # 设置请求到达时间
         )
 
     def append_output_token_ids(

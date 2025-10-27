@@ -43,7 +43,7 @@ logger = init_logger(__name__)
 # RL/SLA感知调度器导入
 try:
     from .sla_aware import SLAScheduler
-    from .rl import RLScheduler
+    from .rl import RLScheduler, RLFinishedReqHandler,RLRequest
     SLA_SCHEDULER_AVAILABLE = True
     RL_SCHEDULER_AVAILABLE = True
 
@@ -230,6 +230,7 @@ class Scheduler(SchedulerInterface):
         if RL_SCHEDULER_AVAILABLE:
             try:
                 self.rl_scheduler = RLScheduler()
+                self.rl_finished_req_handler = RLFinishedReqHandler()
                 logger.info(f"RL Scheduler initialized: {self.rl_scheduler.get_simple_status()}")
             except Exception as e:
                 logger.warning(f"RL Scheduler initialization failed: {e}")
@@ -317,7 +318,8 @@ class Scheduler(SchedulerInterface):
             # 获取完整的RL调度决策
             self.rl_env_info = None
             self.rl_env_info = {'running_requests': list(self.running),
-                        'waiting_requests': list(self.waiting),}
+                        'waiting_requests': list(self.waiting),
+                        'now_time': time.monotonic()}
             
             rl_schedule_decision = self.rl_scheduler.compute_schedule_decision(self.rl_env_info)
             print("============================================================")
@@ -673,6 +675,8 @@ class Scheduler(SchedulerInterface):
                     # 如果RL调度器提供了具体分配，优先使用
                     if rl_allocated_tokens is not None:
                         num_new_tokens = min(num_new_tokens, rl_allocated_tokens, token_budget)
+                    else:
+                        num_new_tokens = min(num_new_tokens, token_budget)
                     
                     assert num_new_tokens > 0
 
@@ -1271,6 +1275,15 @@ class Scheduler(SchedulerInterface):
                 continue
 
             if request.status == RequestStatus.RUNNING:
+                
+                if self.rl_scheduler and self.rl_scheduler.enabled:
+                    now = time.monotonic()
+                    comform_slo = False
+                    if now - request.arrival_time < request.slo:
+                        comform_slo = True
+                    rl_finished_req = RLRequest(req_id, comform_slo)
+
+                    self.rl_finished_req_handler.add_rl_finished_req(rl_finished_req)
                 self.running.remove(request)
             else:
                 self.waiting.remove(request)

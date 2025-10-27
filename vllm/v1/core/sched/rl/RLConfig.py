@@ -16,6 +16,9 @@ class RLSchedulerConfig:
     # === RLScheduler 参数 ===
     enabled: bool = False              # 是否启用RL SLA调度器
     
+    # # RLRequest 参数
+    rl_finished_reqs_buffer_size: int = 100  # 已完成请求缓冲区大小
+
     # === agent 参数 ===
     device: str = "cpu"                # 训练所用设备（cuda/cpu）
     train_enabled: bool = True         # 是否进行训练
@@ -31,7 +34,18 @@ class RLSchedulerConfig:
     use_pretrained_model: bool = False  # 是否使用预训练模型
     pretrained_model_path: str = ""     # 预训练模型路径
     report_monitor_frequency: float = 30.0  # 报告监控频率（单位：秒）
-    
+    llm_model_len: int = 10000              # LLM模型长度
+    B_norm: int = 16                  # 批次归一化因子
+    S_norm: int = 2048                  # 序列长度归一化因子
+    throughput_norm: float = 20000.0    # 吞吐量归一化因子
+    slo_norm: float = 30.0              # SLO 归一化因子
+    prompt_norm: float = 10000.0      # 提示归一化因子
+    K_waiting: int = 10                # 取top-K个等待请求提取特征
+    K_running: int = 10                # 取top-K个运行请求提取特征
+    lambda_slo: float = 1           # SLO 奖励权重
+    lambda_tp: float = 0.3           # 吞吐量奖励权重
+    lambda_latency: float = 0.2       # 延迟奖励权重
+        
     # === RLOptimizer 参数 ===
     optimization_timeout_ms: float = 20.0    # 优化器超时时间（ms）
 
@@ -48,6 +62,9 @@ class RLSchedulerConfig:
 
             # RLScheduler 参数
             enabled=os.getenv('VLLM_RL_SCHEDULER_ENABLED', 'false').lower() == 'true',
+            
+            # RLRequest 参数
+            rl_finished_reqs_buffer_size=int(os.getenv('VLLM_RL_FINISHED_REQS_BUFFER_SIZE', '100')),
 
             # agent 参数
             device=os.getenv('VLLM_RL_DEVICE', 'cpu').lower(),
@@ -63,6 +80,19 @@ class RLSchedulerConfig:
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
             report_monitor_frequency=float(os.getenv('VLLM_RL_REPORT_MONITOR_FREQUENCY', '30.0')),
             
+            # agent env_info 参数
+            llm_model_len=int(os.getenv('VLLM_RL_LLM_MODEL_LEN', '10000')),
+            B_norm=int(os.getenv('VLLM_RL_B_NORM', '16')),
+            S_norm=int(os.getenv('VLLM_RL_S_NORM', '2048')),
+            throughput_norm=float(os.getenv('VLLM_RL_THROUGHPUT_NORM', '20000.0')),
+            slo_norm=float(os.getenv('VLLM_RL_SLO_NORM', '30.0')),
+            prompt_norm=float(os.getenv('VLLM_RL_PROMPT_NORM', '10000.0')),
+            K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '10')),
+            K_running=int(os.getenv('VLLM_RL_K_RUNNING', '10')),
+            lambda_slo=float(os.getenv('VLLM_RL_LAMBDA_SLO', '1')),
+            lambda_tp=float(os.getenv('VLLM_RL_LAMBDA_TP', '0.3')),
+            lambda_latency=float(os.getenv('VLLM_RL_LAMBDA_LATENCY', '0.2')),
+
             # RLOptimizer 参数
             optimization_timeout_ms=float(os.getenv('VLLM_RL_OPTIMIZATION_TIMEOUT_MS', '20.0')),
 

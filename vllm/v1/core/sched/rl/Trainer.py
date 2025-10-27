@@ -60,10 +60,70 @@ class Trainer:
         return random.sample(self.rl_replay_buffer, batch_size)
     
     def caculate_reward(self, before_env_info,after_env_info):
-        """计算奖励（根据环境反馈）"""
-        # 简单示例：奖励为动作执行后的奖励值
-        reward_num_waiting_request = 0
-        if len(after_env_info["waiting_requests"]) < len(before_env_info["waiting_requests"]):
-            reward_num_waiting_request += 1
-        reward = reward_num_waiting_request*1
+        """
+        综合奖励函数：
+        R = λ1*SLO成功率 + λ2*吞吐量 - λ3*延迟惩罚 - λ4*资源浪费
+        """
+        reward = 0.0
+
+        # ---------- 1. SLO 满足情况 ----------
+        finished = after_env_info.get("finished_requests", [])
+        total_finished = len(finished)
+        if total_finished > 0:
+            num_slo_met = 0
+            for req in finished:
+                slo = req["slo"]
+                arrival = req["arrival_time"]
+                finish_t = req["finish_time"]
+                latency = finish_t - arrival
+                if latency <= slo:
+                    num_slo_met += 1
+            R_slo = num_slo_met / total_finished
+        else:
+            R_slo = 0.0
+
+        # ---------- 2. 吞吐量奖励 ----------
+        throughput = after_env_info.get("throughput", 0.0) / self.config.throughput_norm
+        R_tp = throughput
+
+        # ---------- 3. 延迟惩罚 ----------
+        # 如果当前iteration选择的S很大、且运行队列中decode请求比例高，则惩罚
+        B = after_env_info.get("B", 0)
+        S = after_env_info.get("S", 0)
+        running = after_env_info.get("running_requests", [])
+        if len(running) > 0:
+            num_decode = sum(1 for r in running if self._is_decode_phase(r))
+            decode_ratio = num_decode / len(running)
+        else:
+            decode_ratio = 0.0
+
+        S_ratio = min(1.0, S / self.config.S_norm)
+        R_latency_penalty = decode_ratio * S_ratio  # decode越多，S越大惩罚越强
+
+
+        # ---------- 综合 ----------
+        reward = (self.config.lambda_slo * R_slo) + \
+                (self.config.lambda_tp * R_tp) - \
+                (self.config.lambda_latency * R_latency_penalty) 
+
+        # # 限制范围
+        # reward = np.clip(reward, -5.0, 5.0)
+
+        # # 可选：debug输出
+        # after_env_info["reward_detail"] = {
+        #     "R_slo": R_slo,
+        #     "R_tp": R_tp,
+        #     "R_latency_penalty": R_latency_penalty,
+        #     "R_util_penalty": R_util_penalty,
+        #     "reward_total": reward
+        # }
+
         return reward
+
+    def _is_decode_phase(self, request) -> bool:
+        """判断请求是否处于decode阶段"""
+        try:
+            return request.num_computed_tokens >= request.num_prompt_tokens
+        except AttributeError:
+            # 如果字段不存在，假设是prefill阶段
+            return False

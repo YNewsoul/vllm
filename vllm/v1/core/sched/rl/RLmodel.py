@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import logging
 
+import torch.nn.functional as F
+
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -35,3 +37,151 @@ class MLPNetwork(nn.Module):
         if not isinstance(x, torch.Tensor):
             x = torch.tensor(x, dtype=torch.float32)
         return self.network(x)
+
+class DualAttentionNetwork(nn.Module):
+    """
+    Dual Attention Network（支持 mask、初始化、可返回 attention 权重）
+    输入:
+        global_vec: [B, G]
+        wait_arr: [B, K_wait, F_wait]
+        run_arr:  [B, K_run, F_run]
+        wait_mask: [B, K_wait] (optional) 1=valid,0=pad
+        run_mask:  [B, K_run]  (optional)
+    输出:
+        mode='discrete' -> Q-values [B, action_dim]
+        mode='continuous' -> (mu [B,2], logstd [B,2])
+    forward 支持 return_attn=True 返回 (out, wait_weights, run_weights)
+    """
+    def __init__(self, G: int, K_wait: int, F_wait: int, K_run: int, F_run: int,
+                 action_dim: int, hidden=256, mode="discrete"):
+        super().__init__()
+        self.mode = mode
+
+        # waiting request encoder
+        self.wait_encoder = nn.Sequential(
+            nn.Linear(F_wait, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU()
+        )
+        self.wait_att = nn.Linear(64, 1)
+
+        # running request encoder (separate weights)
+        self.run_encoder = nn.Sequential(
+            nn.Linear(F_run, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU()
+        )
+        self.run_att = nn.Linear(64, 1)
+
+        # backbone combines global + pooled_wait + pooled_run
+        self.backbone = nn.Sequential(
+            nn.Linear(G + 64 + 64, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden//2),
+            nn.ReLU()
+        )
+
+        if self.mode == "discrete":
+            self.head = nn.Linear(hidden//2, action_dim)
+        else:
+            self.mu = nn.Linear(hidden//2, 2)
+            # learnable logstd scalar per action-dim
+            self.logstd = nn.Parameter(torch.zeros(2))
+
+        # 初始化权重
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
+    def _masked_softmax(self, scores: torch.Tensor, mask: torch.Tensor, dim: int = 1, eps: float = 1e-8):
+        """
+        scores: [B, K]
+        mask:   [B, K], 1 for valid, 0 for pad. If mask is None -> normal softmax
+        返回: weights [B, K]
+        """
+        if mask is None:
+            return F.softmax(scores, dim=dim)
+
+        # set padding positions to large negative so softmax ~ 0
+        neg_inf = -1e9
+        scores_masked = scores.masked_fill(mask == 0, neg_inf)
+
+        # 如果某行全为pad (mask.sum==0)，我们需要避免 all -inf which yields NaN.
+        # 处理方式：当 mask_sum==0 时，把 scores_masked 改为 zeros so softmax -> uniform (but we will zero out later)
+        mask_sum = mask.sum(dim=dim, keepdim=True)  # [B,1]
+        all_pad = (mask_sum == 0).squeeze(dim)
+
+        # replace rows that are all pad with zeros (so softmax gives uniform) then zero them manually
+        if all_pad.any():
+            scores_masked[all_pad] = torch.zeros_like(scores_masked[all_pad])
+
+        weights = F.softmax(scores_masked, dim=dim)
+
+        # zero-out weights for rows that were all pad
+        if all_pad.any():
+            weights[all_pad] = 0.0
+
+        return weights
+
+    def forward(self, global_vec: torch.Tensor, wait_arr: torch.Tensor, run_arr: torch.Tensor,
+                wait_mask: torch.Tensor = None, run_mask: torch.Tensor = None, return_attn: bool = False):
+        """
+        wait_mask, run_mask: tensors of 0/1 with same device/dtype as global_vec (or None)
+        """
+        device = global_vec.device
+        dtype = global_vec.dtype
+
+        B = global_vec.size(0)
+
+        # --- waiting encoding & attention ---
+        Kw = wait_arr.size(1)
+        if Kw > 0:
+            wait_flat = wait_arr.view(B * Kw, -1).to(device=device, dtype=dtype)
+            wait_enc = self.wait_encoder(wait_flat).view(B, Kw, -1)  # [B, Kw, 64]
+            wait_scores = self.wait_att(wait_enc).squeeze(-1)  # [B, Kw]
+            if wait_mask is not None:
+                wait_mask = wait_mask.to(device=device)
+            wait_weights = self._masked_softmax(wait_scores, wait_mask, dim=1)  # [B, Kw]
+            pooled_wait = (wait_weights.unsqueeze(-1) * wait_enc).sum(dim=1)  # [B, 64]
+        else:
+            pooled_wait = torch.zeros(B, 64, device=device, dtype=dtype)
+            wait_weights = torch.zeros(B, 0, device=device, dtype=dtype)
+
+        # --- running encoding & attention ---
+        Kr = run_arr.size(1)
+        if Kr > 0:
+            run_flat = run_arr.view(B * Kr, -1).to(device=device, dtype=dtype)
+            run_enc = self.run_encoder(run_flat).view(B, Kr, -1)  # [B, Kr, 64]
+            run_scores = self.run_att(run_enc).squeeze(-1)  # [B, Kr]
+            if run_mask is not None:
+                run_mask = run_mask.to(device=device)
+            run_weights = self._masked_softmax(run_scores, run_mask, dim=1)  # [B, Kr]
+            pooled_run = (run_weights.unsqueeze(-1) * run_enc).sum(dim=1)  # [B, 64]
+        else:
+            pooled_run = torch.zeros(B, 64, device=device, dtype=dtype)
+            run_weights = torch.zeros(B, 0, device=device, dtype=dtype)
+
+        # --- concat + backbone ---
+        gv = global_vec.to(device=device, dtype=dtype)
+        x = torch.cat([gv, pooled_wait, pooled_run], dim=1)
+        h = self.backbone(x)
+
+        if self.mode == "discrete":
+            out = self.head(h)
+        else:
+            mu = self.mu(h)
+            # clamp logstd to avoid extreme variance
+            logstd = torch.clamp(self.logstd, min=-6.0, max=1.0)
+            logstd = logstd.expand_as(mu)
+            out = (mu, logstd)
+
+        if return_attn:
+            return out, wait_weights, run_weights
+        return out
