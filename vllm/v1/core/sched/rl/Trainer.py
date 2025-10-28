@@ -2,7 +2,7 @@ import threading
 import logging
 import random
 from collections import deque
-
+from copy import deepcopy
 
 from vllm.logger import init_logger
 
@@ -43,7 +43,7 @@ class Trainer:
     def add_exp(self, before_env_info,after_env_info,action) :
         """添加经验到回放池（每个经验对应一轮迭代的交互）"""
         reward = self.caculate_reward(before_env_info,after_env_info)
-        self.rl_replay_buffer.append((before_env_info, after_env_info, action, reward))
+        self.rl_replay_buffer.append((deepcopy(before_env_info), deepcopy(after_env_info), action, reward))
 
         # 当经验池达到阈值且满足训练间隔时，启动异步训练
         if (len(self.rl_replay_buffer) >= self.config.train_batch_size and 
@@ -67,56 +67,52 @@ class Trainer:
         reward = 0.0
 
         # ---------- 1. SLO 满足情况 ----------
-        finished = after_env_info.get("finished_requests", [])
-        total_finished = len(finished)
-        if total_finished > 0:
-            num_slo_met = 0
-            for req in finished:
-                slo = req["slo"]
-                arrival = req["arrival_time"]
-                finish_t = req["finish_time"]
-                latency = finish_t - arrival
-                if latency <= slo:
-                    num_slo_met += 1
-            R_slo = num_slo_met / total_finished
+        before_recent_comform_slo_rate = before_env_info.get("recent_comform_slo_rate", 0.0)
+        after_recent_comform_slo_rate = after_env_info.get("recent_comform_slo_rate", 0.0)
+        if after_recent_comform_slo_rate > before_recent_comform_slo_rate:
+            R_slo = 1
         else:
-            R_slo = 0.0
-
+            R_slo = -1
+        
         # ---------- 2. 吞吐量奖励 ----------
-        throughput = after_env_info.get("throughput", 0.0) / self.config.throughput_norm
-        R_tp = throughput
+
+        R_tp = after_env_info.get("current_throughput", 0.0) / self.config.throughput_norm
 
         # ---------- 3. 延迟惩罚 ----------
         # 如果当前iteration选择的S很大、且运行队列中decode请求比例高，则惩罚
-        B = after_env_info.get("B", 0)
-        S = after_env_info.get("S", 0)
-        running = after_env_info.get("running_requests", [])
-        if len(running) > 0:
-            num_decode = sum(1 for r in running if self._is_decode_phase(r))
-            decode_ratio = num_decode / len(running)
-        else:
-            decode_ratio = 0.0
+        select_B = after_env_info.get("select_B", 0)
+        select_S = after_env_info.get("select_S", 0)
+        actual_B = after_env_info.get("actual_B", 0)
+        actual_S = after_env_info.get("actual_S", 0)
+        decode_count = after_env_info.get("decode_count", 0)
+        prefill_count = after_env_info.get("prefill_count", 0)
 
-        S_ratio = min(1.0, S / self.config.S_norm)
-        R_latency_penalty = decode_ratio * S_ratio  # decode越多，S越大惩罚越强
+        # 匹配B、S惩罚
+        R_match_B_penalty = 0
+        R_match_S_penalty = 0
+        if abs(select_B - actual_B) > 1:
+            R_match_B_penalty = -1
+        if abs(select_S - actual_S) > 255:
+            R_match_S_penalty = -1
+        R_match_penalty = 0.5*R_match_B_penalty + 0.5*R_match_S_penalty
+
+
+
+        # running = after_env_info.get("running_requests", [])
+        # if len(running) > 0:
+        #     num_decode = sum(1 for r in running if self._is_decode_phase(r))
+        #     decode_ratio = num_decode / len(running)
+        # else:
+        #     decode_ratio = 0.0
+
+        # S_ratio = min(1.0, S / self.config.S_norm)
+        # R_latency_penalty = decode_ratio * S_ratio  # decode越多，S越大惩罚越强
 
 
         # ---------- 综合 ----------
         reward = (self.config.lambda_slo * R_slo) + \
-                (self.config.lambda_tp * R_tp) - \
-                (self.config.lambda_latency * R_latency_penalty) 
-
-        # # 限制范围
-        # reward = np.clip(reward, -5.0, 5.0)
-
-        # # 可选：debug输出
-        # after_env_info["reward_detail"] = {
-        #     "R_slo": R_slo,
-        #     "R_tp": R_tp,
-        #     "R_latency_penalty": R_latency_penalty,
-        #     "R_util_penalty": R_util_penalty,
-        #     "reward_total": reward
-        # }
+                (self.config.lambda_tp * R_tp) + \
+                (self.config.lambda_match * R_match_penalty)
 
         return reward
 

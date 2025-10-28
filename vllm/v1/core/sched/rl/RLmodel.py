@@ -54,16 +54,27 @@ class DualAttentionNetwork(nn.Module):
     """
     def __init__(self, G: int, K_wait: int, F_wait: int, K_run: int, F_run: int,
                  action_dim: int, hidden=256, mode="discrete"):
+        """
+        G: 全局状态维度
+        K_wait: 等待队列view长度上限长度
+        F_wait: 等待队列特征维度
+        K_run: 运行队列view长度上限长度
+        F_run: 运行队列特征维度
+        action_dim: 动作维度
+        hidden: 隐藏层维度
+        mode: 输出模式（"discrete"或"continuous"）
+        """
         super().__init__()
         self.mode = mode
 
-        # waiting request encoder
+        # 分别将等待队列和运行队列的特征编码为64维向量
         self.wait_encoder = nn.Sequential(
             nn.Linear(F_wait, 64),
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU()
         )
+        # 等待队列注意力机制，产生一个标量 score，用来做 softmax 注意力权重
         self.wait_att = nn.Linear(64, 1)
 
         # running request encoder (separate weights)
@@ -75,7 +86,7 @@ class DualAttentionNetwork(nn.Module):
         )
         self.run_att = nn.Linear(64, 1)
 
-        # backbone combines global + pooled_wait + pooled_run
+        # 把 global + pooled_wait + pooled_run 的信息混合、抽象，输出动作 Q 值或策略参数
         self.backbone = nn.Sequential(
             nn.Linear(G + 64 + 64, hidden),
             nn.ReLU(),
@@ -102,6 +113,7 @@ class DualAttentionNetwork(nn.Module):
 
     def _masked_softmax(self, scores: torch.Tensor, mask: torch.Tensor, dim: int = 1, eps: float = 1e-8):
         """
+        在 softmax 前把 padding 的位置设为大负数（-1e9），从而在 softmax 后权重近似 0
         scores: [B, K]
         mask:   [B, K], 1 for valid, 0 for pad. If mask is None -> normal softmax
         返回: weights [B, K]

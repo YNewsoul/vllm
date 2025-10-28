@@ -55,15 +55,7 @@ class RLScheduler:
             logger.info("RL Scheduler disabled by configuration")
     
     def compute_schedule_decision(self,env_info:Dict):
-        """计算 RL 调度决策
-        
-        Returns:
-            调度决策字典，包含：
-            - 'allocation': Dict[str, int] - request_id -> token数的分配
-            - 'token_budget': int - 总token预算
-            - 'prioritize_decode': bool - 是否优先decode
-            失败时返回None
-        """
+        """计算 RL 调度决策 """
         if not self.enabled:
             return None
         
@@ -75,8 +67,6 @@ class RLScheduler:
             # Phase 1:从 RLAgent中选择 batch_size,token_budget
             self.env.set_before_env_info(env_info)
             (batch_size, token_budget) = self.rl_agent.select(env_info,len(env_info["running_requests"]))
-            # batch_size = min(batch_size, self.env.max_batch_size)
-            # token_budget = min(token_budget, self.env.max_tokens)
 
             # Phase 2:使用 optimizer 计算具体分配
             result = self.optimizer.optimize_schedule(
@@ -89,8 +79,8 @@ class RLScheduler:
             if result:
                 self.stats['successful_optimizations'] += 1
                 self.stats['last_optimization_result'] = {
-                    'actual_batch_size': result.actual_batch_size,
-                    'token_budget': result.optimal_token_budget,
+                    'select_B': result.select_B,
+                    'token_budget': result.select_S,
                     'decode_count': result.decode_count,
                     'prefill_count': result.prefill_count,
                 }
@@ -100,14 +90,17 @@ class RLScheduler:
                 
                 if self.config.verbose_logging:
                     logger.debug(f"RL schedule decision: "
-                                f"token_budget={result.optimal_token_budget}, "
-                                f"batch_size={result.actual_batch_size}, "
+                                f"token_budget={result.select_S}, "
+                                f"select_B={result.select_B}, "
                                 f"allocation={len(result.allocation)} requests")
                 
                 return {
                     'allocation': result.allocation,
-                    'token_budget': result.optimal_token_budget,
-                    'prioritize_decode': result.decode_count > 0
+                    'token_budget': result.select_S,
+                    'prioritize_decode': result.decode_count > 0,
+                    'actual_B': result.actual_B,
+                    'actual_S': result.actual_S,
+                    'select_B': result.select_B,
                 }
     
     def get_status(self) -> Dict[str, Any]:

@@ -1,6 +1,6 @@
-
 import numpy as np
 from typing import Dict
+from copy import deepcopy
 
 class Env:
     """
@@ -14,11 +14,11 @@ class Env:
 
     def set_before_env_info(self,before_env_info:Dict):
         self.before_env_info = None
-        self.before_env_info = before_env_info
+        self.before_env_info = deepcopy(before_env_info)
         
     def set_after_env_info(self,after_env_info:Dict):
         self.after_env_info = None
-        self.after_env_info = after_env_info
+        self.after_env_info = deepcopy(after_env_info)
 
     def get_env_info(self):
         return self.before_env_info, self.after_env_info

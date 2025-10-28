@@ -17,13 +17,14 @@ class RLOptimizationResult:
     
     输出结果，用于调度器进行资源分配决策。
     """
-    optimal_batch_size: int                # 最优batch size
-    optimal_token_budget: int              # 最优token预算
-    allocation: Dict[str, int]             # request_id -> tokens的分配映射
-    optimization_time_ms: float            # 调度执行时间
-    actual_batch_size: int                 # 实际分配的batch size
-    decode_count: int                      # decode请求数量
-    prefill_count: int                     # prefill请求数量
+    select_B: int                # 最优batch size
+    select_S: int                # 最优token预算
+    allocation: Dict[str, int]   # request_id -> tokens的分配映射
+    optimization_time_ms: float  # 调度执行时间
+    actual_B: int                # 实际分配的batch size
+    actual_S: int                # 实际分配的token预算
+    decode_count: int            # decode请求数量
+    prefill_count: int           # prefill请求数量
 
 
 class RLOptimizer:
@@ -69,11 +70,12 @@ class RLOptimizer:
                             running_requests, waiting_requests, allocation
                         )
             result = RLOptimizationResult(
-                            optimal_batch_size=batch_size,
-                            optimal_token_budget=token_budget,
+                            select_B=batch_size,
+                            select_S=token_budget,
                             allocation=allocation,
                             optimization_time_ms=0,  # 稍后设置
-                            actual_batch_size=actual_batch_size,
+                            actual_B=actual_batch_size,
+                            actual_S=actual_tokens,
                             decode_count=decode_count,
                             prefill_count=prefill_count
                         )

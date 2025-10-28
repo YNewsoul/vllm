@@ -11,7 +11,7 @@ from typing import Dict
 from vllm.logger import init_logger
 
 from .RLConfig import RLSchedulerConfig
-from .RLmodel import MLPNetwork
+from .RLmodel import MLPNetwork, DualAttentionNetwork
 
 logger = init_logger(__name__)
 
@@ -54,7 +54,17 @@ class RLAgent:
         if self.config.rl_model == "MLPNetwork":  
             self.main_model = MLPNetwork(self.config.state_dim, self.config.action_dim).to(self.device)
             self.target_model = MLPNetwork(self.config.state_dim, self.config.action_dim).to(self.device)
-
+        elif self.config.rl_model == "DualAttentionNetwork":
+            
+            self.main_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting, 
+                                                   self.config.Feature_waiting, self.config.K_running, 
+                                                   self.config.Feature_running, self.config.action_dim).to(self.device)
+            self.target_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting,
+                                                    self.config.Feature_waiting, self.config.K_running, 
+                                                    self.config.Feature_running, self.config.action_dim).to(self.device)
+        else:
+            raise ValueError(f"Unsupported rl_model: {self.config.rl_model}")
+        
         if self.config.verbose_logging:
             logger.info(f"Initializing model: {self.config.rl_model}")
         
@@ -125,6 +135,8 @@ class RLAgent:
                     return self.action
                 # 否则回退到完全随机选择
                 self.action = random.choice(self.action_map)
+                if self.epsilon > self.epsilon_min:
+                    self.epsilon *= self.epsilon_decay
                 return self.action
             
         with torch.no_grad():
@@ -221,11 +233,7 @@ class RLAgent:
             logger.info(f"update target model, step: {self.train_step}")
             self.target_model.load_state_dict(self.main_model.state_dict())
         
-        # 8. 衰减探索概率
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
-        
-        # 9. 打印监控信息
+        # 8. 打印监控信息
         now = time.time()
         if now - self.last_report_monitor_time >= self.config.report_monitor_frequency:
             logger.info(
@@ -320,7 +328,7 @@ class RLAgent:
         # recent aggregated metrics
         recent_throughput = float(env_info.get("recent_throughput", 0.0)) / self.config.throughput_norm
         recent_avg_latency = float(env_info.get("recent_avg_latency", 0.0)) / self.config.slo_norm
-        recent_slo_violation = float(env_info.get("recent_slo_violation_rate", 0.0))
+        recent_comform_slo_rate = float(env_info.get("recent_comform_slo_rate", 0.0))
 
         last_B = float(env_info.get("last_B", 0.0))/self.config.B_norm
         last_S = float(env_info.get("last_S", 0.0))/self.config.S_norm
@@ -333,7 +341,7 @@ class RLAgent:
             frac_decode,
             avg_wait_remaining,min_wait_remaining,
             avg_run_remaining,min_run_remaining,
-            recent_throughput,recent_avg_latency,recent_slo_violation,
+            recent_throughput,recent_avg_latency,recent_comform_slo_rate,
             last_B,last_S,
         ], dtype=np.float32)
 

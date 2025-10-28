@@ -8,7 +8,7 @@ from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 from itertools import chain
-
+from copy import deepcopy
 # 添加profiling相关的导入
 import json
 import os
@@ -43,7 +43,8 @@ logger = init_logger(__name__)
 # RL/SLA感知调度器导入
 try:
     from .sla_aware import SLAScheduler
-    from .rl import RLScheduler, RLFinishedReqHandler,RLRequest
+    from .rl import RLScheduler
+    from .rl import RLDataCollection
     SLA_SCHEDULER_AVAILABLE = True
     RL_SCHEDULER_AVAILABLE = True
 
@@ -230,8 +231,22 @@ class Scheduler(SchedulerInterface):
         if RL_SCHEDULER_AVAILABLE:
             try:
                 self.rl_scheduler = RLScheduler()
-                self.rl_finished_req_handler = RLFinishedReqHandler()
+                self.rl_data_collection = RLDataCollection()
                 logger.info(f"RL Scheduler initialized: {self.rl_scheduler.get_simple_status()}")
+                # RL 环境相关信息
+                self.rl_env_info = {'running_requests': None,
+                        'waiting_requests': None,
+                        'now_time': None,
+                        'recent_throughput': 0.0,
+                        'recent_avg_latency': 0.0,
+                        'recent_comform_slo_rate': 0.0,
+                        'current_throughput': 0.0,
+                        'last_B':0.0,
+                        'last_S':0.0,
+                        'select_B':0.0,
+                        'select_S':0.0,
+                        'actual_B':0.0,
+                        'actual_S':0.0}
             except Exception as e:
                 logger.warning(f"RL Scheduler initialization failed: {e}")
                 self.rl_scheduler = None
@@ -316,26 +331,26 @@ class Scheduler(SchedulerInterface):
         # 使用 RL 调度器
         if self.rl_scheduler and self.rl_scheduler.enabled:
             # 获取完整的RL调度决策
-            self.rl_env_info = None
-            self.rl_env_info = {'running_requests': list(self.running),
-                        'waiting_requests': list(self.waiting),
-                        'now_time': time.monotonic()}
-            
-            rl_schedule_decision = self.rl_scheduler.compute_schedule_decision(self.rl_env_info)
+            self.update_rl_env_info()
+            self.rl_schedule_decision = None
+            self.rl_schedule_decision = self.rl_scheduler.compute_schedule_decision(self.rl_env_info)
             print("============================================================")
-            print(f"RL Scheduler decision: {rl_schedule_decision}")
-            logger.info(f"RL Scheduler decision: {rl_schedule_decision}")
-            if rl_schedule_decision:
+            print(f"RL Scheduler decision: {self.rl_schedule_decision}")
+            logger.info(f"RL Scheduler decision: {self.rl_schedule_decision}")
+            if self.rl_schedule_decision:
                 # 从RL决策中提取token预算和是否优先decode阶段
-                token_budget = rl_schedule_decision['token_budget']
-                prioritize_decode = rl_schedule_decision['prioritize_decode']
+                token_budget = self.rl_schedule_decision['token_budget']
+                prioritize_decode = self.rl_schedule_decision['prioritize_decode']
+                self.rl_data_collection.update_BS(self.rl_schedule_decision)
+                self.rl_data_collection.set_decode_count(self.rl_schedule_decision['decode_count'])
+                self.rl_data_collection.set_prefill_count(self.rl_schedule_decision['prefill_count'])
             else:
                 # 无法从RL调度器获取决策
                 token_budget = self.max_num_scheduled_tokens
                 prioritize_decode = False
         else:
             # RL调度器不可用
-            rl_schedule_decision = None
+            self.rl_schedule_decision = None
             token_budget = self.max_num_scheduled_tokens
             prioritize_decode = False
         
@@ -372,8 +387,8 @@ class Scheduler(SchedulerInterface):
 
             # 检查 RL 调度器是否为此请求提供了具体分配
             rl_allocated_tokens = None
-            if rl_schedule_decision and 'allocation' in rl_schedule_decision:
-                rl_allocated_tokens = rl_schedule_decision['allocation'].get(request.request_id, None)
+            if self.rl_schedule_decision and 'allocation' in self.rl_schedule_decision:
+                rl_allocated_tokens = self.rl_schedule_decision['allocation'].get(request.request_id, None)
 
             # 若启用负载感知或SLA调度器建议优先decode，且当前是 running prefill，且还有 decode 未满足，则将该请求移到队尾，优先服务 decode
             if (self.enable_load_aware_sched or prioritize_decode) and (request.num_computed_tokens < request.num_prompt_tokens) \
@@ -565,8 +580,8 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.appendleft(request)
                         continue
                 # 检查RL调度器是否为该请求分配tokens
-                elif rl_schedule_decision and 'allocation' in rl_schedule_decision:
-                    rl_allocated_tokens = rl_schedule_decision['allocation'].get(request.request_id, None)
+                elif self.rl_schedule_decision and 'allocation' in self.rl_schedule_decision:
+                    rl_allocated_tokens = self.rl_schedule_decision['allocation'].get(request.request_id, None)
                     if rl_allocated_tokens is not None and rl_allocated_tokens == 0:
                         # RL调度器决定不调度此请求，跳过它
                         self.waiting.popleft()
@@ -669,8 +684,8 @@ class Scheduler(SchedulerInterface):
 
                     # 检查RL调度器是否为此请求提供了具体分配
                     rl_allocated_tokens = None
-                    if rl_schedule_decision and 'allocation' in rl_schedule_decision:
-                        rl_allocated_tokens = rl_schedule_decision['allocation'].get(request.request_id, None)
+                    if self.rl_schedule_decision and 'allocation' in self.rl_schedule_decision:
+                        rl_allocated_tokens = self.rl_schedule_decision['allocation'].get(request.request_id, None)
                     
                     # 如果RL调度器提供了具体分配，优先使用
                     if rl_allocated_tokens is not None:
@@ -1281,9 +1296,8 @@ class Scheduler(SchedulerInterface):
                     comform_slo = False
                     if now - request.arrival_time < request.slo:
                         comform_slo = True
-                    rl_finished_req = RLRequest(req_id, comform_slo)
 
-                    self.rl_finished_req_handler.add_rl_finished_req(rl_finished_req)
+                    self.rl_data_collection.add_rl_finished_req(comform_slo)
                 self.running.remove(request)
             else:
                 self.waiting.remove(request)
@@ -1549,19 +1563,15 @@ class Scheduler(SchedulerInterface):
             return
         
         try:
-            self.rl_env_info = None
             # 从profiling数据中提取性能指标
             actual_batch_size = len([s for s in self.current_batch_profiling_data.get('chunk_sizes', []) if s > 0])
             actual_total_tokens = self.current_batch_profiling_data.get('total_scheduled_tokens', 0)
-            actual_latency = model_run_duration * 1000  # 转换为ms
+            actual_latency = model_run_duration # s
 
-            self.rl_env_info = {
-                "actual_batch_size": actual_batch_size,
-                "actual_total_tokens": actual_total_tokens,
-                "actual_latency": actual_latency,
-                "running_requests":self.running,
-                "waiting_requests":self.waiting,
-            }
+            self.rl_data_collection.add_throughput((actual_total_tokens,actual_latency))
+            self.rl_data_collection.add_latency(actual_latency)
+
+            self.update_rl_env_info(True)
             
             self.rl_scheduler.record_performance(self.rl_env_info)
             if self.rl_scheduler.config.verbose_logging:
@@ -1647,3 +1657,17 @@ class Scheduler(SchedulerInterface):
             )
         except Exception as e:
             logger.warning(f"ELRAR state collection (async) failed: {e}")
+
+    def update_rl_env_info(self,After: bool=True):
+        self.rl_env_info['running_requests'] = self.running
+        self.rl_env_info['waiting_requests'] = self.waiting
+        self.rl_env_info['now_time'] = time.monotonic()
+        if After:
+            self.rl_env_info['recent_throughput'] = self.rl_data_collection.get_throughput()
+            self.rl_env_info['recent_avg_latency'] = self.rl_data_collection.get_avg_latency()
+            self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
+            self.rl_env_info['current_throughput'] = self.rl_data_collection.get_current_throughput()
+            self.rl_env_info['decode_count'] = self.rl_data_collection.get_decode_count()
+            self.rl_env_info['prefill_count'] = self.rl_data_collection.get_prefill_count()
+            B_S = self.rl_data_collection.get_BS()
+            self.rl_env_info.update(B_S)

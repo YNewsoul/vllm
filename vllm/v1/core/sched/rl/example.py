@@ -5,6 +5,7 @@ SLA感知调度器使用示例
 演示如何配置和使用SLA感知调度器，包括性能监控和调试。
 """
 
+from copy import deepcopy
 import os
 import time
 import sys
@@ -28,7 +29,6 @@ def demonstrate_config_loading():
     print("=" * 50)
     
     try:
-        
         
         # 从环境变量加载
         config = RLSchedulerConfig.from_env()
@@ -55,16 +55,19 @@ def demonstrate_rl_scheduler():
         
         # 创建模拟请求（这里用简化的数据结构）
         class MockRequest:
-            def __init__(self, req_id: str, num_computed_tokens: int = 0, num_prompt_tokens: int = 100):
+            def __init__(self, req_id: str, num_computed_tokens: int = 0, num_prompt_tokens: int = 100,
+                         slo: float = 10.0):
                 self.request_id = req_id
                 self.num_computed_tokens = num_computed_tokens
                 self.num_prompt_tokens = num_prompt_tokens
+                self.slo = slo
+                self.arrival_time = time.monotonic()
         
-        req_1 = MockRequest("req_1", 50, 100000)
-        req_2 = MockRequest("req_2", 100, 100)
-        req_3 = MockRequest("req_3", 100, 100)
-        req_4 = MockRequest("req_4", 0, 2000000)
-        req_5 = MockRequest("req_5", 0, 1500000)
+        req_1 = MockRequest("req_1", 50, 100000, 10.0)
+        req_2 = MockRequest("req_2", 100, 100, 10.0)
+        req_3 = MockRequest("req_3", 100, 100, 10.0)
+        req_4 = MockRequest("req_4", 0, 2000000, 10.0)
+        req_5 = MockRequest("req_5", 0, 1500000, 10.0)
 
         running_requests = [
             req_1,   # prefill阶段
@@ -80,8 +83,8 @@ def demonstrate_rl_scheduler():
         sech_count = 0
         while True:
             rl_env_info = {
-                "running_requests": running_requests,
-                "waiting_requests": waiting_requests,
+                "running_requests": deepcopy(running_requests),
+                "waiting_requests": deepcopy(waiting_requests),
             }
             result = scheduler.compute_schedule_decision(rl_env_info)
             if sech_count !=0:
