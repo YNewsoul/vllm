@@ -2,9 +2,11 @@ import os
 from dataclasses import dataclass
 import logging
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 @dataclass
 class RLSchedulerConfig:
@@ -91,7 +93,7 @@ class RLSchedulerConfig:
             epsilon_decay=float(os.getenv('VLLM_RL_EPSILON_DECAY', '0.995')),
             epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.01')),
             target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '100')),
-            rl_model=os.getenv('VLLM_RL_MODEL', 'MLPNetwork'),
+            rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),
             use_pretrained_model=os.getenv('VLLM_RL_USE_PRETRAINED_MODEL', 'false').lower() == 'true',
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
             report_monitor_frequency=float(os.getenv('VLLM_RL_REPORT_MONITOR_FREQUENCY', '30.0')),

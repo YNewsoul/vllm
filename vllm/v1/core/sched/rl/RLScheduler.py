@@ -6,16 +6,27 @@
 
 import time
 from typing import Optional, Dict, Any, List, Tuple
+import logging
 
-from .RLConfig import RLSchedulerConfig
-from .RLAgent import RLAgent
-from .RLOptimizer import RLOptimizer
-from .Trainer import Trainer
-from .Env import Env
 
-from vllm.logger import init_logger
+try:
+    from .RLConfig import RLSchedulerConfig
+    from .RLAgent import RLAgent
+    from .RLOptimizer import RLOptimizer
+    from .Trainer import Trainer
+    from .Env import Env
+except ImportError:
+    from RLConfig import RLSchedulerConfig
+    from RLAgent import RLAgent
+    from RLOptimizer import RLOptimizer
+    from Trainer import Trainer
+    from Env import Env
 
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 
 class RLScheduler:
@@ -130,6 +141,7 @@ class RLScheduler:
             'enabled': self.enabled,
             'avg_optimization_time_ms': self.stats['avg_optimization_time_ms'],
             'last_optimization_result': self.stats['last_optimization_result'],
+            'train':self.rl_agent.train_enabled,
         }
     
     def reset(self) -> None:

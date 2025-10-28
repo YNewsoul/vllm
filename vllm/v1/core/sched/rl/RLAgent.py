@@ -8,12 +8,18 @@ import random
 import time
 from typing import Dict
 
-from vllm.logger import init_logger
+try:
+    from .RLConfig import RLSchedulerConfig
+    from .RLmodel import MLPNetwork, DualAttentionNetwork
+except ImportError:
+    from RLConfig import RLSchedulerConfig
+    from RLmodel import MLPNetwork, DualAttentionNetwork
 
-from .RLConfig import RLSchedulerConfig
-from .RLmodel import MLPNetwork, DualAttentionNetwork
-
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 class RLAgent:
     """
@@ -32,7 +38,7 @@ class RLAgent:
         self._initialize_model()
 
         # 训练组件（适配轻量网络）
-        self.optimizer = optim.Adam(self.main_model.parameters(), lr=self.lr)  # 低学习率，稳定更新
+        self.optimizer = optim.Adam(self.main_model.parameters(), lr=self.config.lr)  # 低学习率，稳定更新
         self.criterion = torch.nn.MSELoss()  # 均方误差损失（拟合Q值）
         self.train_step = 0    # 训练步数计数器
 
@@ -62,6 +68,8 @@ class RLAgent:
             self.target_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting,
                                                     self.config.Feature_waiting, self.config.K_running, 
                                                     self.config.Feature_running, self.config.action_dim).to(self.device)
+            print("Initializing model DualAttentionNetwork successfully!")
+            logger.info(f"Initializing model DualAttentionNetwork successfully!")
         else:
             raise ValueError(f"Unsupported rl_model: {self.config.rl_model}")
         
@@ -95,14 +103,14 @@ class RLAgent:
         if self.config.rl_model == "MLPNetwork":
             self.state_dim = self.config.state_dim
             self.action_dim = self.config.action_dim
-            self.lr = self.config.lr
+        self.lr = self.config.lr
 
-            # DQN超参数（对齐文档约束）
-            self.gamma = self.config.gamma                                    # 折扣因子（长期奖励权重）
-            self.epsilon = self.config.epsilon                                # 初始探索概率
-            self.epsilon_decay = self.config.epsilon_decay                    # 探索概率衰减率
-            self.epsilon_min = self.config.epsilon_min                        # 最小探索概率（保留少量试错）
-            self.target_net_update_freq = self.config.target_net_update_freq  # 目标网络更新频率
+        # DQN超参数（对齐文档约束）
+        self.gamma = self.config.gamma                                    # 折扣因子（长期奖励权重）
+        self.epsilon = self.config.epsilon                                # 初始探索概率
+        self.epsilon_decay = self.config.epsilon_decay                    # 探索概率衰减率
+        self.epsilon_min = self.config.epsilon_min                        # 最小探索概率（保留少量试错）
+        self.target_net_update_freq = self.config.target_net_update_freq  # 目标网络更新频率
         
         # 标记为已有模型（已加载预训练或初始化）
         self.is_ready = True
@@ -372,7 +380,7 @@ class RLAgent:
             # remaining_prefill_tokens: if available (how many prompt tokens left to prefill), normalize by S_max
             remaining_prefill = max(0.0, r.num_prompt_tokens - r.num_computed_tokens) / self.config.prompt_norm
             # pack: we normalize elapsed by slo as proxy (or by a fixed constant)
-            elapsed_norm = min(1.0, elapsed / max(1.0, r['slo']))
+            elapsed_norm = min(1.0, elapsed / max(1.0, r.slo))
             running_feats.append([p_len, processed, is_dec, remaining, age, elapsed_norm, remaining_prefill])
             run_mask.append(1.0)
         

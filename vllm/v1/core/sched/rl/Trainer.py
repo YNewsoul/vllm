@@ -4,12 +4,18 @@ import random
 from collections import deque
 from copy import deepcopy
 
-from vllm.logger import init_logger
+try:
+    from .RLConfig import RLSchedulerConfig
+    from .RLAgent import RLAgent
+except ImportError:
+    from RLConfig import RLSchedulerConfig
+    from RLAgent import RLAgent
 
-from .RLConfig import RLSchedulerConfig
-from .RLAgent import RLAgent
-
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 class Trainer:
     def __init__(self,rl_agent:RLAgent):

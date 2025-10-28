@@ -4,9 +4,11 @@ import logging
 
 import torch.nn.functional as F
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 class MLPNetwork(nn.Module):
     """
@@ -113,7 +115,6 @@ class DualAttentionNetwork(nn.Module):
 
     def _masked_softmax(self, scores: torch.Tensor, mask: torch.Tensor, dim: int = 1, eps: float = 1e-8):
         """
-        在 softmax 前把 padding 的位置设为大负数（-1e9），从而在 softmax 后权重近似 0
         scores: [B, K]
         mask:   [B, K], 1 for valid, 0 for pad. If mask is None -> normal softmax
         返回: weights [B, K]
@@ -121,24 +122,22 @@ class DualAttentionNetwork(nn.Module):
         if mask is None:
             return F.softmax(scores, dim=dim)
 
-        # set padding positions to large negative so softmax ~ 0
         neg_inf = -1e9
         scores_masked = scores.masked_fill(mask == 0, neg_inf)
 
-        # 如果某行全为pad (mask.sum==0)，我们需要避免 all -inf which yields NaN.
-        # 处理方式：当 mask_sum==0 时，把 scores_masked 改为 zeros so softmax -> uniform (but we will zero out later)
-        mask_sum = mask.sum(dim=dim, keepdim=True)  # [B,1]
-        all_pad = (mask_sum == 0).squeeze(dim)
+        mask_sum = mask.sum(dim=dim, keepdim=True)
+        all_pad = (mask_sum == 0)
 
-        # replace rows that are all pad with zeros (so softmax gives uniform) then zero them manually
-        if all_pad.any():
-            scores_masked[all_pad] = torch.zeros_like(scores_masked[all_pad])
+        # 对全 pad 行单独处理，不在原 tensor 上改
+        safe_scores = torch.where(all_pad, torch.zeros_like(scores_masked), scores_masked)
 
-        weights = F.softmax(scores_masked, dim=dim)
+        weights = F.softmax(safe_scores, dim=dim)
 
-        # zero-out weights for rows that were all pad
-        if all_pad.any():
-            weights[all_pad] = 0.0
+        # 再用 mask 清零无效位置（非原地）
+        weights = weights * mask.float()
+
+        # 最后对 all-pad 行显式归零（非原地）
+        weights = torch.where(all_pad, torch.zeros_like(weights), weights)
 
         return weights
 

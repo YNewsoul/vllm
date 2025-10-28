@@ -11,8 +11,12 @@ import time
 import sys
 from typing import List, Dict, Any
 
-from .RLConfig import RLSchedulerConfig
-from .RLScheduler import RLScheduler
+try:
+    from .RLConfig import RLSchedulerConfig
+    from .RLScheduler import RLScheduler
+except ImportError :
+    from RLConfig import RLSchedulerConfig
+    from RLScheduler import RLScheduler
 
 # 设置示例配置
 def setup_example_config():
@@ -81,14 +85,28 @@ def demonstrate_rl_scheduler():
         ]
         
         sech_count = 0
+
+        rl_env_info = {'running_requests': None,
+        'waiting_requests': None,
+        'now_time': None,
+        'recent_throughput': 0.0,
+        'recent_avg_latency': 0.0,
+        'recent_comform_slo_rate': 0.0,
+        'current_throughput': 0.0,
+        'last_B':0.0,
+        'last_S':0.0,
+        'select_B':0.0,
+        'select_S':0.0,
+        'actual_B':0.0,
+        'actual_S':0.0}
+        
         while True:
-            rl_env_info = {
-                "running_requests": deepcopy(running_requests),
-                "waiting_requests": deepcopy(waiting_requests),
-            }
+            rl_env_info['running_requests'] = running_requests
+            rl_env_info['waiting_requests'] = waiting_requests
+            rl_env_info['now_time'] = time.monotonic()
+
             result = scheduler.compute_schedule_decision(rl_env_info)
-            if sech_count !=0:
-                scheduler.record_performance(rl_env_info)
+
             if sech_count <= 30:
                 print(f"✅ 调度决策结果: {result}")
             for req in running_requests:
@@ -100,6 +118,11 @@ def demonstrate_rl_scheduler():
                     running_requests.append(req)
                     req.num_computed_tokens += result['allocation'][req.request_id]
             sech_count += 1
+
+            rl_env_info['running_requests'] = running_requests
+            rl_env_info['waiting_requests'] = waiting_requests
+            rl_env_info['now_time'] = time.monotonic()
+            scheduler.record_performance(rl_env_info)
         
     except ImportError as e:
         print(f"❌ 无法导入RL调度器模块: {e}")

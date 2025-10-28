@@ -115,7 +115,6 @@ class Request:
             structured_output_request=StructuredOutputRequest(
                 sampling_params=request.sampling_params),
             cache_salt=request.cache_salt,
-             arrival_time=time.monotonic(),  # 设置请求到达时间
         )
 
     def append_output_token_ids(

@@ -1658,7 +1658,7 @@ class Scheduler(SchedulerInterface):
         except Exception as e:
             logger.warning(f"ELRAR state collection (async) failed: {e}")
 
-    def update_rl_env_info(self,After: bool=True):
+    def update_rl_env_info(self,After: bool=False):
         self.rl_env_info['running_requests'] = self.running
         self.rl_env_info['waiting_requests'] = self.waiting
         self.rl_env_info['now_time'] = time.monotonic()

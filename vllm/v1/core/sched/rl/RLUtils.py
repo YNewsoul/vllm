@@ -3,7 +3,10 @@
 from collections import deque
 from typing import Dict
 
-from .RLConfig import RLSchedulerConfig
+try:
+    from .RLConfig import RLSchedulerConfig
+except ImportError:
+    from RLConfig import RLSchedulerConfig
 
 class RLDataCollection:
     def __init__(self):

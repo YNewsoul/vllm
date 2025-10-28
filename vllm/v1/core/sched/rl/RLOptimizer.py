@@ -2,13 +2,19 @@ import time
 from typing import List, Dict, Tuple, Optional, Any
 import sys
 import os
+import logging
 from dataclasses import dataclass
 
-from vllm.logger import init_logger
+try:
+    from .RLConfig import RLSchedulerConfig
+except ImportError:
+    from RLConfig import RLSchedulerConfig
 
-from .RLConfig import RLSchedulerConfig
-
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+except ImportError:
+    logger = logging.getLogger(__name__)
 
 
 @dataclass
