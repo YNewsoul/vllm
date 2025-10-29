@@ -37,7 +37,8 @@ class RLSchedulerConfig:
     rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
     use_pretrained_model: bool = False  # 是否使用预训练模型
     pretrained_model_path: str = ""     # 预训练模型路径
-    report_monitor_frequency: float = 30.0  # 报告监控频率（单位：秒）
+    save_model_frequency: float = 60.0  # 保存模型频率（单位：秒）
+    log_frequency: int = 10           # 日志记录频率（单位：step）
 
     # === env 参数 ===
     llm_model_len: int = 10000              # LLM模型长度
@@ -48,10 +49,10 @@ class RLSchedulerConfig:
     prompt_norm: float = 10000.0      # 提示归一化因子
 
     # === reward 函数参数 ===
-    lambda_slo: float = 1            # SLO 奖励权重
-    lambda_tp: float = 0.3           # 吞吐量奖励权重
-    lambda_latency: float = 0.2      # 延迟奖励权重
-    lambda_match: float = 0.3        # 匹配奖励权重
+    lambda_recent_comform_slo: float = 2         # 最近符合SLO请求奖励权重
+    lambda_recent_throughput: float = 1        # 最近吞吐量奖励权重
+    lambda_R_match_penalty: float = 0.5          # 匹配奖励权重
+    lambda_R_comform_violate: float = 0.5        # 符合SLO请求奖励权重
 
     # === DualAttentionNetwork 参数 ===
     Global_state_dim: int = 18          # G: 全局状态维度
@@ -65,8 +66,8 @@ class RLSchedulerConfig:
 
     # === Trainer 参数 ===
     replay_buffer_size: int = 10000    # 经验回放缓冲区大小
-    max_episodes: int = 100          # 最大训练轮数（单位：episode）
-    train_batch_size: int = 32        # 训练批次大小
+    max_episodes: int = 10000          # 最大训练轮数（单位：episode）
+    train_batch_size: int = 128        # 训练批次大小
 
     @classmethod
     def from_env(cls) -> 'RLSchedulerConfig':
@@ -84,7 +85,7 @@ class RLSchedulerConfig:
 
             # agent 参数
             device=os.getenv('VLLM_RL_DEVICE', 'cpu').lower(),
-            train_enabled=os.getenv('VLLM_RL_TRAIN_ENABLED', 'false').lower() == 'true',
+            train_enabled=os.getenv('VLLM_RL_TRAIN_ENABLED', 'true').lower() == 'true',
             state_dim=int(os.getenv('VLLM_RL_STATE_DIM', '4')),
             action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '16')),
             lr=float(os.getenv('VLLM_RL_LR', '1e-4')),
@@ -96,8 +97,9 @@ class RLSchedulerConfig:
             rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),
             use_pretrained_model=os.getenv('VLLM_RL_USE_PRETRAINED_MODEL', 'false').lower() == 'true',
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
-            report_monitor_frequency=float(os.getenv('VLLM_RL_REPORT_MONITOR_FREQUENCY', '30.0')),
-            
+            save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '60.0')),
+            log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '10')),
+
             # env 参数
             llm_model_len=int(os.getenv('VLLM_RL_LLM_MODEL_LEN', '10000')),
             B_norm=int(os.getenv('VLLM_RL_B_NORM', '16')),
@@ -107,10 +109,10 @@ class RLSchedulerConfig:
             prompt_norm=float(os.getenv('VLLM_RL_PROMPT_NORM', '10000.0')),
 
             # reward 函数参数
-            lambda_slo=float(os.getenv('VLLM_RL_LAMBDA_SLO', '1')),
-            lambda_tp=float(os.getenv('VLLM_RL_LAMBDA_TP', '0.3')),
-            lambda_latency=float(os.getenv('VLLM_RL_LAMBDA_LATENCY', '0.2')),
-            lambda_match=float(os.getenv('VLLM_RL_LAMBDA_MATCH', '0.3')),
+            lambda_recent_comform_slo=float(os.getenv('VLLM_RL_LAMBDA_RECENT_CONFORM_SLO', '2')),
+            lambda_recent_throughput=float(os.getenv('VLLM_RL_LAMBDA_RECENT_THROUGHPUT', '1')),
+            lambda_R_match_penalty=float(os.getenv('VLLM_RL_LAMBDA_R_MATCH_PENALTY', '0.5')),
+            lambda_R_comform_violate=float(os.getenv('VLLM_RL_LAMBDA_R_COMPFORM_VIOLATE', '0.5')),
 
             # DualAttentionNetwork 参数
             Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '18')),
@@ -124,7 +126,7 @@ class RLSchedulerConfig:
 
             # Trainer 参数
             replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '10000')),
-            max_episodes=int(os.getenv('VLLM_RL_MAX_EPISODES', '1000')),
-            train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '32')),
+            max_episodes=int(os.getenv('VLLM_RL_MAX_EPISODES', '10000')),
+            train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '128')),
         )
         return config

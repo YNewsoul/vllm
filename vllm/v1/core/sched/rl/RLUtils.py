@@ -53,10 +53,10 @@ class RLDataCollection:
         self.total_model_time += model_time
         self.current_throughput = actual_token / model_time
         if len(self.throughput_buffer)==self.throughput_buffer.maxlen:
-            pop_token,pop_model_time = self.throughput_buffer.popleft()
+            (pop_token,pop_model_time) = self.throughput_buffer.popleft()
             self.total_token -= pop_token
             self.total_model_time -= pop_model_time
-        self.throughput_buffer.append(actual_token,model_time)
+        self.throughput_buffer.append((actual_token,model_time))
     def get_throughput(self):
         return self.total_token / self.total_model_time
     def get_current_throughput(self):

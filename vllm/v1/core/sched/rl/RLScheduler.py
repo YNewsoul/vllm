@@ -77,6 +77,7 @@ class RLScheduler:
 
             # Phase 1:从 RLAgent中选择 batch_size,token_budget
             self.env.set_before_env_info(env_info)
+            logger.info(f"the running requests num is {len(env_info['running_requests'])}")
             (batch_size, token_budget) = self.rl_agent.select(env_info,len(env_info["running_requests"]))
 
             # Phase 2:使用 optimizer 计算具体分配
@@ -112,6 +113,8 @@ class RLScheduler:
                     'actual_B': result.actual_B,
                     'actual_S': result.actual_S,
                     'select_B': result.select_B,
+                    'decode_count': result.decode_count,
+                    'prefill_count': result.prefill_count,
                 }
     
     def get_status(self) -> Dict[str, Any]:

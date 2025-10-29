@@ -34,10 +34,10 @@ class Trainer:
             with self.train_lock:
                 self.is_training = True
                 try:
+                    self.rl_agent.reset()
                     for episode in range(self.max_episodes):
                         batch = self.sample_exp(self.config.train_batch_size)
                         self.rl_agent.learn(batch)
-                    self.rl_agent.save_model()
                     logger.info(f"Finished the {self.max_episodes} round of model training and save the model")
                 except Exception as e:
                     logger.error(f"Failed to train episode {episode}: {str(e)}")
@@ -54,7 +54,7 @@ class Trainer:
         # 当经验池达到阈值且满足训练间隔时，启动异步训练
         if (len(self.rl_replay_buffer) >= self.config.train_batch_size and 
             not self.is_training):
-            
+            logger.info(f"=============================================================")
             logger.info(f"start train ..........")
             # 创建并启动训练线程
             train_thread = threading.Thread(target=self._train_in_thread, daemon=True)
@@ -72,28 +72,33 @@ class Trainer:
         """
         reward = 0.0
 
-        # ---------- 1. SLO 满足情况 ----------
-        before_recent_comform_slo_rate = before_env_info.get("recent_comform_slo_rate", 0.0)
-        after_recent_comform_slo_rate = after_env_info.get("recent_comform_slo_rate", 0.0)
-        if after_recent_comform_slo_rate > before_recent_comform_slo_rate:
-            R_slo = 1
-        else:
-            R_slo = -1
-        
-        # ---------- 2. 吞吐量奖励 ----------
+        # rl_env_info = {'running_requests': None,
+        # 'waiting_requests': None,
+        # 'now_time': None,
+        # 'recent_throughput': 0.0,
+        # 'recent_avg_latency': 0.0,
+        # 'recent_comform_slo_rate': 0.0,
+        # 'current_throughput': 0.0,
+        # 'last_B':0.0,
+        # 'last_S':0.0,
+        # 'select_B':0.0,
+        # 'select_S':0.0,
+        # 'actual_B':0.0,
+        # 'actual_S':0.0}
 
-        R_tp = after_env_info.get("current_throughput", 0.0) / self.config.throughput_norm
+        # ========== 1 长期奖励 ==========
+        # ---------- 1.1 最近一段时间/n个请求的SLO 满足情况 ----------
+        recent_comform_slo_rate = after_env_info.get("recent_comform_slo_rate", 0.0)
 
-        # ---------- 3. 延迟惩罚 ----------
-        # 如果当前iteration选择的S很大、且运行队列中decode请求比例高，则惩罚
+        # ---------- 1.2 最近一段时间/n个iteration 吞吐量奖励 ----------
+        recent_throughput = after_env_info.get("recent_throughput", 0.0)/ self.config.throughput_norm
+
+        # ========== 2 短期奖励 ==========
+        # ---------- 2.1 匹配B、S惩罚 ----------
         select_B = after_env_info.get("select_B", 0)
         select_S = after_env_info.get("select_S", 0)
         actual_B = after_env_info.get("actual_B", 0)
         actual_S = after_env_info.get("actual_S", 0)
-        decode_count = after_env_info.get("decode_count", 0)
-        prefill_count = after_env_info.get("prefill_count", 0)
-
-        # 匹配B、S惩罚
         R_match_B_penalty = 0
         R_match_S_penalty = 0
         if abs(select_B - actual_B) > 1:
@@ -102,23 +107,28 @@ class Trainer:
             R_match_S_penalty = -1
         R_match_penalty = 0.5*R_match_B_penalty + 0.5*R_match_S_penalty
 
-
-
-        # running = after_env_info.get("running_requests", [])
-        # if len(running) > 0:
-        #     num_decode = sum(1 for r in running if self._is_decode_phase(r))
-        #     decode_ratio = num_decode / len(running)
-        # else:
-        #     decode_ratio = 0.0
-
-        # S_ratio = min(1.0, S / self.config.S_norm)
-        # R_latency_penalty = decode_ratio * S_ratio  # decode越多，S越大惩罚越强
-
+        # ----------- 2.2 请求在slo内完成奖励,请求违反slo惩罚 ----------
+        before_running_req = before_env_info.get("running_requests",[])
+        after_running_req = after_env_info.get("running_requests",[])
+        after_running_req_ids = [req.request_id for req in after_running_req]
+        now_time = after_env_info.get("now_time", 0.0)
+        comform_req_count = 0
+        violate_req_count = 0
+        R_comform_violate = 0
+        for req in before_running_req:
+            if req.request_id not in after_running_req_ids:
+                # 请求已完成
+                if now_time - req.arrival_time < req.slo:
+                    comform_req_count += 1
+                else:
+                    violate_req_count += 1
+        R_comform_violate = comform_req_count*0.5 - violate_req_count*0.5
 
         # ---------- 综合 ----------
-        reward = (self.config.lambda_slo * R_slo) + \
-                (self.config.lambda_tp * R_tp) + \
-                (self.config.lambda_match * R_match_penalty)
+        reward = (self.config.lambda_recent_comform_slo * recent_comform_slo_rate) + \
+                (self.config.lambda_recent_throughput * recent_throughput) + \
+                (self.config.lambda_R_match_penalty * R_match_penalty) + \
+                (self.config.lambda_R_comform_violate * R_comform_violate)
 
         return reward
 

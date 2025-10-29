@@ -72,12 +72,12 @@ class Scheduler(SchedulerInterface):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-        structured_output_manager: StructuredOutputManager,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        include_finished_set: bool = False,
-        log_stats: bool = False,
+        vllm_config: VllmConfig, # vllm 全局配置
+        kv_cache_config: KVCacheConfig, # KV cache配置
+        structured_output_manager: StructuredOutputManager, # 结构化输出管理器
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY, # 多模态注册器
+        include_finished_set: bool = False, # 是否在输出中包含已完成请求的集合
+        log_stats: bool = False, # 是否记录统计信息
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -96,10 +96,11 @@ class Scheduler(SchedulerInterface):
             defaultdict(set) if include_finished_set else None)
 
         # Scheduling constraints.
-        self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        # 调度约束信息
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs # 最大运行请求数
         self.max_num_scheduled_tokens = \
-            self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = self.scheduler_config.max_model_len
+            self.scheduler_config.max_num_batched_tokens # 最大调度token数
+        self.max_model_len = self.scheduler_config.max_model_len # 最大模型长度
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events)
@@ -107,6 +108,7 @@ class Scheduler(SchedulerInterface):
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
+        # KV 连接器，用于分布式KV传输
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
@@ -119,13 +121,13 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config,
             vllm_config.parallel_config.data_parallel_rank,
         )
-
+        # 初始化gpu块信息
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
         self.block_size = self.cache_config.block_size
 
-        # req_id -> Request
+        # req_id -> Request 请求存储结构
         self.requests: dict[str, Request] = {}
         # Priority queues for requests.
         self.waiting: deque[Request] = deque()
@@ -135,6 +137,7 @@ class Scheduler(SchedulerInterface):
         # current steps. This is used to notify the workers about the finished
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
+        # 已完成请求的ID集合，用于通知工作节点释放缓存
         self.finished_req_ids: set[str] = set()
 
         # KV Connector: requests in process of async KV loading or recving
@@ -146,7 +149,7 @@ class Scheduler(SchedulerInterface):
         self._cached_reqs_data: dict[
             str, deque[CachedRequestData]] = defaultdict(deque)
 
-        # Encoder-related.
+        # Encoder-related.编码器相关
         # Calculate encoder cache size if applicable
         # NOTE: For now we use the same budget for both compute and space.
         # This can be changed when we make encoder cache for embedding caching
@@ -166,7 +169,7 @@ class Scheduler(SchedulerInterface):
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
             cache_size=encoder_cache_size)
-
+        # 投机解码相关
         speculative_config = vllm_config.speculative_config
 
         self.use_eagle = False
@@ -177,7 +180,7 @@ class Scheduler(SchedulerInterface):
                 self.use_eagle = True
                 self.num_lookahead_tokens = self.num_spec_tokens
 
-        # Create the KV cache manager.
+        # Create the KV cache manager. kV cache管理器
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -195,15 +198,12 @@ class Scheduler(SchedulerInterface):
         self.profiling_log_file = os.getenv('VLLM_SCHEDULER_PROFILING_LOG', 'scheduler_profiling.jsonl')
         if self.enable_profiling and self.profiling_log_file:
             logger.info(f"Profiling log file: {self.profiling_log_file}")
-        # 是否输出 log 到终端
-        self.profiling_console = os.getenv('VLLM_SCHEDULER_PROFILING_CONSOLE', 'false').lower() == 'true'
+        self.profiling_console = os.getenv('VLLM_SCHEDULER_PROFILING_CONSOLE', 'false').lower() == 'true' # 控制终端输出
         self.batch_counter = 0
-        # 记录调度完成时间，用于计算model run时间
-        self.last_schedule_end_time: Optional[float] = None
-        # 当前batch的profiling数据，用于log和SLA调度
-        self.current_batch_profiling_data: Optional[dict] = None
-        # 记录当前step的obs_data，用于RL训练
-        self.rl_env_info: Optional[dict] = None
+        self.last_schedule_end_time: Optional[float] = None # 记录调度完成时间，用于计算model run时间
+        self.current_batch_profiling_data: Optional[dict] = None # 当前batch的profiling数据，用于log和SLA调度
+        self.current_batch_rl_data: Optional[dict] = None # 当前batch的用于提供给rl scheduler的数据
+        self.rl_env_info: Optional[dict] = None # 记录当前step的obs_data，用于RL训练
 
         # 负载感知调度：开关与参数
         self.enable_load_aware_sched = os.getenv('VLLM_ENABLE_LOAD_AWARE_SCHED', 'false').lower() == 'true'
@@ -215,6 +215,10 @@ class Scheduler(SchedulerInterface):
         self.slo_tpot_ms = float(os.getenv('VLLM_SLO_TPOT_MS', '50'))
         self.la_t_min_ms = float(os.getenv('VLLM_LA_T_MIN_MS', '15'))
         self.la_q_high = int(os.getenv('VLLM_LA_Q_HIGH', '5'))
+
+        # sla/rl 调度结果
+        self.select_B = None
+        self.select_S = None
 
         # 初始化SLA感知调度器
         self.sla_scheduler = None
@@ -255,9 +259,7 @@ class Scheduler(SchedulerInterface):
         self.elrar_agent = None
         if ELRAR_AGENT_AVAILABLE:
             try:
-                # ELRAR Agent现在只使用环境变量进行配置
                 logger.info("ELRAR Engine Agent using environment variables for configuration")
-                
                 self.elrar_agent = EngineAgent()
                 if self.elrar_agent.enabled:
                     logger.info(f"ELRAR Engine Agent initialized: {self.elrar_agent.engine_id}")
@@ -281,13 +283,12 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
-        # Profiling: 记录调度开始时间
-        schedule_start_time = time.monotonic()
+        schedule_start_time = time.monotonic() # Profiling: 记录调度开始时间
 
-        scheduled_new_reqs: list[Request] = []
-        scheduled_resumed_reqs: list[Request] = []
-        scheduled_running_reqs: list[Request] = []
-        preempted_reqs: list[Request] = []
+        scheduled_new_reqs: list[Request] = [] # 新调度的请求
+        scheduled_resumed_reqs: list[Request] = [] # 恢复的请求（从抢占状态）
+        scheduled_running_reqs: list[Request] = [] # 正在运行的请求
+        preempted_reqs: list[Request] = [] # 被抢占的请求
 
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
@@ -295,10 +296,11 @@ class Scheduler(SchedulerInterface):
         # This will helps us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
+        # 结构化输出请求ID映射（请求ID到运行请求索引）
         structured_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
-        num_scheduled_tokens: dict[str, int] = {}
+        num_scheduled_tokens: dict[str, int] = {} # 记录每个请求已调度的token数
         
         # 计算token预算和目标延迟：使用SLA调度器
         if self.sla_scheduler and self.sla_scheduler.enabled:
@@ -334,12 +336,11 @@ class Scheduler(SchedulerInterface):
             self.update_rl_env_info()
             self.rl_schedule_decision = None
             self.rl_schedule_decision = self.rl_scheduler.compute_schedule_decision(self.rl_env_info)
-            print("============================================================")
-            print(f"RL Scheduler decision: {self.rl_schedule_decision}")
-            logger.info(f"RL Scheduler decision: {self.rl_schedule_decision}")
             if self.rl_schedule_decision:
                 # 从RL决策中提取token预算和是否优先decode阶段
                 token_budget = self.rl_schedule_decision['token_budget']
+                self.select_B = self.rl_schedule_decision['select_B']
+                self.select_S = token_budget
                 prioritize_decode = self.rl_schedule_decision['prioritize_decode']
                 self.rl_data_collection.update_BS(self.rl_schedule_decision)
                 self.rl_data_collection.set_decode_count(self.rl_schedule_decision['decode_count'])
@@ -357,14 +358,13 @@ class Scheduler(SchedulerInterface):
         # 统一夹紧到全局上限，确保不超过系统限制
         token_budget = min(token_budget, self.max_num_scheduled_tokens)
 
-        # Encoder-related.
+        # Encoder-related. 编码器相关
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
-        # Spec decode-related.
+        # Spec decode-related. 投机解码相关
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
-        # For logging.
-        scheduled_timestamp = time.monotonic()
+        scheduled_timestamp = time.monotonic() # For logging.
 
         # First, schedule the RUNNING requests.
         # 1.调度 running 状态的请求
@@ -434,7 +434,7 @@ class Scheduler(SchedulerInterface):
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
-            # 不理解
+            # 确保输入位置不超过最大模型长度（投机解码时必要）
             num_new_tokens = min(
                 num_new_tokens,
                 self.max_model_len - request.num_computed_tokens)
@@ -511,7 +511,7 @@ class Scheduler(SchedulerInterface):
             assert new_blocks is not None
 
             # Schedule the request.
-            # 真正的调度请求
+            # 将请求添加进已调度 running 请求列表
             scheduled_running_reqs.append(request)
             if request.use_structured_output:
                 # PERF: in case of chunked prefill,
@@ -664,6 +664,8 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
+                    # 使用request.num_tokens而不是request.num_prompt_tokens以考虑恢复的请求
+                    # 需要调度的token数量
                     num_new_tokens = request.num_tokens - num_computed_tokens
                     # 长预填充截断处理
                     if (0 < self.scheduler_config.long_prefill_token_threshold
@@ -729,7 +731,7 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks + new_blocks,
                         num_external_computed_tokens,
                     )
-
+                # 从等待队列中弹出请求
                 self.waiting.popleft()
                 if load_kv_async:
                     # If loading async, allocate memory and put request
@@ -742,10 +744,12 @@ class Scheduler(SchedulerInterface):
                     structured_output_request_ids[
                         request.request_id] = req_index
                 req_index += 1
+                # 将请求加入running队列
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
+                # 根据请求的状态将请求加入对应队列
                 if request.status == RequestStatus.WAITING:
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
@@ -761,7 +765,7 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
-                request.num_computed_tokens = num_computed_tokens
+                request.num_computed_tokens = num_computed_tokens # num_computed_tokens 是 kv cache的tokens
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
@@ -775,6 +779,7 @@ class Scheduler(SchedulerInterface):
                     encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
+        # 将任何跳过的请求放回等待队列头部
         if skipped_waiting_requests:
             self.waiting.extendleft(skipped_waiting_requests)
 
@@ -896,6 +901,17 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
                 total_num_scheduled_tokens
             )
+        
+        # 记录 RL 调度器所选的信息
+        if self.rl_scheduler and self.rl_scheduler.enabled:
+            schedule_end_time = time.monotonic()
+            self.last_schedule_end_time = schedule_end_time
+            self.current_batch_rl_data = {
+                "schedule_time":schedule_end_time-schedule_start_time,
+                "num_scheduled_requests":len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs),
+                "total_num_scheduled_tokens":total_num_scheduled_tokens
+            }
+
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -1484,14 +1500,16 @@ class Scheduler(SchedulerInterface):
         # 准备统计信息（不包含model run时间）
         self.current_batch_profiling_data = {
             "batch_id": self.batch_counter,
-            "timestamp": schedule_end_time,
-            "total_scheduled_tokens": total_num_scheduled_tokens,
+            "timestamp": f"{schedule_end_time:.3f}",
+            "select_B": self.select_B,
+            "select_S": self.select_S,
+            "scheduled_tokens": total_num_scheduled_tokens,
             "chunk_sizes": chunk_sizes,
-            "all_computed_tokens": all_computed_tokens,
-            "all_cached_tokens": all_cached_tokens,
-            "schedule_duration_ms": schedule_duration * 1000,
-            "num_waiting_reqs": len(self.waiting),
-            "num_running_reqs": len(self.running),
+            "computed_tokens": all_computed_tokens,
+            "cached_tokens": all_cached_tokens,
+            "schedule_ms": f"{schedule_duration * 1000:.3f}",
+            "num_waiting": len(self.waiting),
+            "num_running": len(self.running),
             # "kv_cache_usage": self.kv_cache_manager.usage if hasattr(self.kv_cache_manager, 'usage') else 0
         }
     
@@ -1501,7 +1519,7 @@ class Scheduler(SchedulerInterface):
             return
         
         # 添加model run时间
-        self.current_batch_profiling_data["model_run_duration_ms"] = model_run_duration * 1000
+        self.current_batch_profiling_data["model_run_ms"] = f"{model_run_duration * 1000:.3f}"
         
         # 写入日志文件
         try:
@@ -1542,7 +1560,7 @@ class Scheduler(SchedulerInterface):
         try:
             # 从profiling数据中提取性能指标
             batch_size = len([s for s in self.current_batch_profiling_data.get('chunk_sizes', []) if s > 0])
-            total_tokens = self.current_batch_profiling_data.get('total_scheduled_tokens', 0)
+            total_tokens = self.current_batch_profiling_data.get('scheduled_tokens', 0)
             actual_latency = model_run_duration * 1000  # 转换为ms
             
             # 验证数据有效性
@@ -1559,25 +1577,23 @@ class Scheduler(SchedulerInterface):
             logger.warning(f"Failed to record SLA scheduler performance: {e}")
 
     def _record_rl_scheduler_performance(self,model_run_duration: float) -> None:
-        if not self.rl_scheduler or not self.current_batch_profiling_data:
+        if not self.rl_scheduler or not self.current_batch_rl_data:
             return
         
         try:
-            # 从profiling数据中提取性能指标
-            actual_batch_size = len([s for s in self.current_batch_profiling_data.get('chunk_sizes', []) if s > 0])
-            actual_total_tokens = self.current_batch_profiling_data.get('total_scheduled_tokens', 0)
+            actual_total_tokens = self.current_batch_rl_data.get('total_num_scheduled_tokens', 0)
             actual_latency = model_run_duration # s
 
-            self.rl_data_collection.add_throughput((actual_total_tokens,actual_latency))
+            self.rl_data_collection.add_throughput(actual_total_tokens,actual_latency)
             self.rl_data_collection.add_latency(actual_latency)
 
             self.update_rl_env_info(True)
-            
             self.rl_scheduler.record_performance(self.rl_env_info)
             if self.rl_scheduler.config.verbose_logging:
                 logger.debug(f"RL scheduler: skipping performance record due to invalid data: "
-                            f"actual_batch_size={actual_batch_size}, actual_total_tokens={actual_total_tokens}, "
+                            f"actual_total_tokens={actual_total_tokens}, "
                             f"actual_latency={actual_latency:.2f}ms")
+            logger.info("update rl_env_info successfully!")
                 
         except Exception as e:
             logger.warning(f"Failed to record RL scheduler performance: {e}")
@@ -1660,7 +1676,7 @@ class Scheduler(SchedulerInterface):
 
     def update_rl_env_info(self,After: bool=False):
         self.rl_env_info['running_requests'] = self.running
-        self.rl_env_info['waiting_requests'] = self.waiting
+        self.rl_env_info['waiting_requests'] = list(self.waiting)
         self.rl_env_info['now_time'] = time.monotonic()
         if After:
             self.rl_env_info['recent_throughput'] = self.rl_data_collection.get_throughput()

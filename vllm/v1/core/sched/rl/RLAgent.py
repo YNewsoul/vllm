@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 import random
 import time
+import json
 from typing import Dict
 
 try:
@@ -50,7 +51,8 @@ class RLAgent:
         ]
 
         self.is_ready = True
-        self.last_report_monitor_time = 0
+        self.last_save_model_time = 0
+        self.log_frequency = self.config.log_frequency
 
 
     def _initialize_model(self):
@@ -115,6 +117,15 @@ class RLAgent:
         # 标记为已有模型（已加载预训练或初始化）
         self.is_ready = True
         self._update_count = 1  
+    def _initialize_log_file(self):
+        training_logs_str = "training_logs"
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        training_logs_dir = os.path.join(current_dir, training_logs_str)
+        current_time = datetime.now()
+        formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        os.makedirs(training_logs_dir, exist_ok=True)
+        self.training_log_file_path = os.path.join(training_logs_dir, f"training_log_{formatted_time}.jsonl")
+        logger.info(f"The training log file was successfully initialized in {self.training_log_file_path}")
             
     def select(self, env_info: Dict, running_requests_len: int):
 
@@ -242,14 +253,13 @@ class RLAgent:
             self.target_model.load_state_dict(self.main_model.state_dict())
         
         # 8. 打印监控信息
-        now = time.time()
-        if now - self.last_report_monitor_time >= self.config.report_monitor_frequency:
-            logger.info(
-                f"loss={loss.item():.4f}, "
-                f"avg_target_q={target_q.mean().item():.3f}, "
-                f"avg_reward={rewards.mean().item():.3f}"
-            )
-            self.last_report_monitor_time = now
+        if self.train_step % self.log_frequency == 0:
+            self.write_log_data(loss.detach().item(),target_q.mean().detach().item(),rewards.mean().detach().item())
+
+        now = time.monotonic()
+        if now - self.last_save_model_time >= self.config.save_model_frequency:
+            self.save_model()
+            self.last_save_model_time = now
         
         return loss.item()
 
@@ -313,7 +323,7 @@ class RLAgent:
 
         # decode 比例
         is_decodes = np.array([1.0 if self._is_decode_phase(r) else 0.0 for r in running], dtype=np.float32)
-        frac_decode = float(is_decodes.mean())
+        frac_decode = float(is_decodes.mean()) if len(is_decodes)>0 else 0.0
 
         # remaining SLO ratios: for waiting and running
 
@@ -400,3 +410,18 @@ class RLAgent:
         except AttributeError:
             # 如果字段不存在，假设是prefill阶段
             return False
+    def write_log_data(self, loss,target_q,rewards):
+        """写入日志数据"""
+        log_data = {"loss":f"{loss:.5f}",
+                    "avg_target_q":f"{target_q:.5f}",
+                    "avg_rewards":f"{rewards:.5f}"}
+        # 写入日志文件
+        try:
+            with open(self.training_log_file_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_data, ensure_ascii=False) + '\n')
+        except Exception as e:
+            logger.warning(f"Failed to write the training log data: {e}")
+        
+    def reset(self):
+        self._initialize_log_file()
+        self.train_step = 0
