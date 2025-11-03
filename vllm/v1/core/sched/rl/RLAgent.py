@@ -110,13 +110,14 @@ class RLAgent:
         # DQN超参数（对齐文档约束）
         self.gamma = self.config.gamma                                    # 折扣因子（长期奖励权重）
         self.epsilon = self.config.epsilon                                # 初始探索概率
-        self.epsilon_decay = self.config.epsilon_decay                    # 探索概率衰减率
+        self.epsilon_max_step = self.config.epsilon_max_step              # 最大探索步数
         self.epsilon_min = self.config.epsilon_min                        # 最小探索概率（保留少量试错）
         self.target_net_update_freq = self.config.target_net_update_freq  # 目标网络更新频率
         
         # 标记为已有模型（已加载预训练或初始化）
         self.is_ready = True
         self._update_count = 1  
+
     def _initialize_log_file(self):
         training_logs_str = "training_logs"
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -139,13 +140,15 @@ class RLAgent:
         wait_mask = torch.tensor(wait_mask, dtype=torch.float32, device=self.device).unsqueeze(0)    # [1, K_wait]
         run_mask = torch.tensor(run_mask, dtype=torch.float32, device=self.device).unsqueeze(0)      # [1, K_run]
 
+
         # === 2. 进入评估模式（关闭dropout/bn） ===
         self.main_model.eval()
         if self.train_enabled:
-            if np.random.rand() <= self.epsilon:
-                # 优先从batch_size大于running_requests_len的动作中随机选择
+            epsilon = max(self.epsilon - self.train_step/self.epsilon_max_step, self.epsilon_min)
+            if np.random.rand() < epsilon:
+                # 优先从batch_size大于等于running_requests_len的动作中随机选择
                 valid_actions = [(i, action) for i, action in enumerate(self.action_map) 
-                             if action[0] > running_requests_len]
+                             if action[0] >= running_requests_len]
             
                 # 如果有符合条件的动作，从中随机选择
                 if valid_actions:
@@ -154,15 +157,14 @@ class RLAgent:
                     return self.action
                 # 否则回退到完全随机选择
                 self.action = random.choice(self.action_map)
-                if self.epsilon > self.epsilon_min:
-                    self.epsilon *= self.epsilon_decay
+
                 return self.action
             
         with torch.no_grad():
             q_values = self.main_model(global_vec, wait_arr, run_arr, wait_mask, run_mask).squeeze(0).cpu().numpy()  # [1, action_dim]
-             # 优先从batch_size大于running_requests_len的动作中选择Q值最高的
+             # 优先从batch_size大于等于running_requests_len的动作中选择Q值最高的
             valid_indices = [i for i, action in enumerate(self.action_map) 
-                             if action[0] > running_requests_len]
+                             if action[0] >= running_requests_len]
             if valid_indices:
                 # 在有效动作中选择Q值最高的
                 valid_q_values = q_values[valid_indices]
@@ -254,7 +256,11 @@ class RLAgent:
         
         # 8. 打印监控信息
         if self.train_step % self.log_frequency == 0:
-            self.write_log_data(loss.detach().item(),target_q.mean().detach().item(),rewards.mean().detach().item())
+            log_data = {"train_step":self.train_step,
+                    "loss":f"{loss.detach().item():.5f}",
+                    "avg_target_q":f"{target_q.mean().detach().item():.5f}",
+                    "avg_rewards":f"{rewards.mean().detach().item():.5f}"}
+            self._write_log_data(log_data)
 
         now = time.monotonic()
         if now - self.last_save_model_time >= self.config.save_model_frequency:
@@ -410,12 +416,9 @@ class RLAgent:
         except AttributeError:
             # 如果字段不存在，假设是prefill阶段
             return False
-    def write_log_data(self, loss,target_q,rewards):
+
+    def _write_log_data(self, log_data):
         """写入日志数据"""
-        log_data = {"loss":f"{loss:.5f}",
-                    "avg_target_q":f"{target_q:.5f}",
-                    "avg_rewards":f"{rewards:.5f}"}
-        # 写入日志文件
         try:
             with open(self.training_log_file_path, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(log_data, ensure_ascii=False) + '\n')
@@ -425,3 +428,4 @@ class RLAgent:
     def reset(self):
         self._initialize_log_file()
         self.train_step = 0
+        self.last_save_model_time = time.monotonic()

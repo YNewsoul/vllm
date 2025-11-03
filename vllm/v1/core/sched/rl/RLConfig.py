@@ -31,14 +31,14 @@ class RLSchedulerConfig:
     lr: float = 1e-4                   # 学习率
     gamma: float = 0.9                 # 折扣因子（长期奖励权重）
     epsilon: float = 0.2               # 初始探索概率
-    epsilon_decay: float = 0.995       # 探索概率衰减率
-    epsilon_min: float = 0.01          # 最小探索概率
+    epsilon_max_step: int = 100000       # 最大探索步数
+    epsilon_min: float = 0.1          # 最小探索概率
     target_net_update_freq: int = 100  # 目标网络更新频率（单位：step）
     rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
     use_pretrained_model: bool = False  # 是否使用预训练模型
     pretrained_model_path: str = ""     # 预训练模型路径
-    save_model_frequency: float = 60.0  # 保存模型频率（单位：秒）
-    log_frequency: int = 10           # 日志记录频率（单位：step）
+    save_model_frequency: float = 180.0  # 保存模型频率（单位：秒）
+    log_frequency: int = 20           # 日志记录频率（单位：step）
 
     # === env 参数 ===
     llm_model_len: int = 10000              # LLM模型长度
@@ -62,12 +62,12 @@ class RLSchedulerConfig:
     Feature_running: int = 7           # 运行队列特征维度
         
     # === RLOptimizer 参数 ===
-    optimization_timeout_ms: float = 20.0    # 优化器超时时间（ms）
+    optimization_timeout_ms: float = 10.0    # 优化器超时时间（ms）
 
     # === Trainer 参数 ===
     replay_buffer_size: int = 10000    # 经验回放缓冲区大小
-    max_episodes: int = 10000          # 最大训练轮数（单位：episode）
     train_batch_size: int = 128        # 训练批次大小
+    train_total_time: float = 3600.0    # 训练总时间（单位：s）
 
     @classmethod
     def from_env(cls) -> 'RLSchedulerConfig':
@@ -91,14 +91,14 @@ class RLSchedulerConfig:
             lr=float(os.getenv('VLLM_RL_LR', '1e-4')),
             gamma=float(os.getenv('VLLM_RL_GAMMA', '0.99')),
             epsilon=float(os.getenv('VLLM_RL_EPSILON', '0.2')),
-            epsilon_decay=float(os.getenv('VLLM_RL_EPSILON_DECAY', '0.995')),
-            epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.01')),
+            epsilon_max_step=int(os.getenv('VLLM_RL_EPSILON_MAX_STEP', '100000')),
+            epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.1')),
             target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '100')),
             rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),
             use_pretrained_model=os.getenv('VLLM_RL_USE_PRETRAINED_MODEL', 'false').lower() == 'true',
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
-            save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '60.0')),
-            log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '10')),
+            save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '180.0')),
+            log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '20')),
 
             # env 参数
             llm_model_len=int(os.getenv('VLLM_RL_LLM_MODEL_LEN', '10000')),
@@ -122,11 +122,11 @@ class RLSchedulerConfig:
             Feature_running=int(os.getenv('VLLM_RL_FEATURE_RUNNING', '7')),
 
             # RLOptimizer 参数
-            optimization_timeout_ms=float(os.getenv('VLLM_RL_OPTIMIZATION_TIMEOUT_MS', '20.0')),
+            optimization_timeout_ms=float(os.getenv('VLLM_RL_OPTIMIZATION_TIMEOUT_MS', '10.0')),
 
             # Trainer 参数
             replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '10000')),
-            max_episodes=int(os.getenv('VLLM_RL_MAX_EPISODES', '10000')),
             train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '128')),
+            train_total_time=float(os.getenv('VLLM_RL_TRAIN_TOTAL_TIME', '3600.0')),
         )
         return config

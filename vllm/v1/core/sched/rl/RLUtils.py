@@ -9,6 +9,7 @@ except ImportError:
     from RLConfig import RLSchedulerConfig
 
 class RLDataCollection:
+    """ RL 数据收集的类"""
     def __init__(self):
         self.config = RLSchedulerConfig.from_env()
 
@@ -57,8 +58,10 @@ class RLDataCollection:
             self.total_token -= pop_token
             self.total_model_time -= pop_model_time
         self.throughput_buffer.append((actual_token,model_time))
+
     def get_throughput(self):
         return self.total_token / self.total_model_time
+        
     def get_current_throughput(self):
         return self.current_throughput
     
@@ -78,6 +81,7 @@ class RLDataCollection:
         self.B_S['select_S'] = obs_data['token_budget']
         self.B_S['actual_B'] = obs_data['actual_B']
         self.B_S['actual_S'] = obs_data['actual_S']
+        
     def get_BS(self):
         return self.B_S
     

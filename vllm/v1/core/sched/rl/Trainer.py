@@ -1,8 +1,8 @@
 import threading
 import logging
 import random
+import time
 from collections import deque
-from copy import deepcopy
 
 try:
     from .RLConfig import RLSchedulerConfig
@@ -22,7 +22,6 @@ class Trainer:
         self.config = RLSchedulerConfig.from_env()
         self.rl_agent = rl_agent
         self.rl_replay_buffer = deque(maxlen=self.config.replay_buffer_size)  # 双端队列（自动淘汰旧数据）
-        self.max_episodes = self.config.max_episodes
 
         # 线程安全相关参数
         self.is_training = False
@@ -35,10 +34,14 @@ class Trainer:
                 self.is_training = True
                 try:
                     self.rl_agent.reset()
-                    for episode in range(self.max_episodes):
-                        batch = self.sample_exp(self.config.train_batch_size)
+                    start_time = time.monotonic()
+                    while True:
+                        batch = self._sample_exp(self.config.train_batch_size)
                         self.rl_agent.learn(batch)
-                    logger.info(f"Finished the {self.max_episodes} round of model training and save the model")
+                        now = time.monotonic()
+                        if now - start_time >= self.config.train_total_time:
+                            break
+                    logger.info(f"Finished the training process in {self.config.train_total_time} seconds")
                 except Exception as e:
                     logger.error(f"Failed to train episode {episode}: {str(e)}")
                 finally:
@@ -48,24 +51,22 @@ class Trainer:
 
     def add_exp(self, before_env_info,after_env_info,action) :
         """添加经验到回放池（每个经验对应一轮迭代的交互）"""
-        reward = self.caculate_reward(before_env_info,after_env_info)
-        self.rl_replay_buffer.append((deepcopy(before_env_info), deepcopy(after_env_info), action, reward))
+        reward = self._caculate_reward(before_env_info,after_env_info)
+        self.rl_replay_buffer.append((before_env_info, after_env_info, action, reward))
 
         # 当经验池达到阈值且满足训练间隔时，启动异步训练
-        if (len(self.rl_replay_buffer) >= self.config.train_batch_size and 
-            not self.is_training):
-            logger.info(f"=============================================================")
+        if len(self.rl_replay_buffer) >= self.config.train_batch_size and not self.is_training:
             logger.info(f"start train ..........")
             # 创建并启动训练线程
             train_thread = threading.Thread(target=self._train_in_thread, daemon=True)
             train_thread.start()
             logger.info(f"Start the asynchronous training thread and determine the current size of the experience pool: {len(self.rl_replay_buffer)}")
 
-    def sample_exp(self, batch_size: int):
+    def _sample_exp(self, batch_size: int):
         """从回放池采样经验（每个经验对应一轮迭代的交互）"""
         return random.sample(self.rl_replay_buffer, batch_size)
     
-    def caculate_reward(self, before_env_info,after_env_info):
+    def _caculate_reward(self, before_env_info,after_env_info):
         """
         综合奖励函数：
         R = λ1*SLO成功率 + λ2*吞吐量 - λ3*延迟惩罚 - λ4*资源浪费
@@ -131,11 +132,3 @@ class Trainer:
                 (self.config.lambda_R_comform_violate * R_comform_violate)
 
         return reward
-
-    def _is_decode_phase(self, request) -> bool:
-        """判断请求是否处于decode阶段"""
-        try:
-            return request.num_computed_tokens >= request.num_prompt_tokens
-        except AttributeError:
-            # 如果字段不存在，假设是prefill阶段
-            return False

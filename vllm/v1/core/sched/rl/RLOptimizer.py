@@ -23,8 +23,8 @@ class RLOptimizationResult:
     
     输出结果，用于调度器进行资源分配决策。
     """
-    select_B: int                # 最优batch size
-    select_S: int                # 最优token预算
+    select_B: int                # 选择的 batch size
+    select_S: int                # 选择的 token预算
     allocation: Dict[str, int]   # request_id -> tokens的分配映射
     optimization_time_ms: float  # 调度执行时间
     actual_B: int                # 实际分配的batch size
@@ -34,13 +34,9 @@ class RLOptimizationResult:
 
 
 class RLOptimizer:
-    """RL优化器
+    """RL优化器"""
     
-    实现论文中描述的延迟导向统一调度算法，通过三个阶段的优化
-    实现最佳的资源分配和SLA保证。
-    """
-    
-    def __init__(self, ):
+    def __init__(self, kv_cache_manager):
         """初始化优化器"""
         self.config = RLSchedulerConfig.from_env()
         
@@ -48,7 +44,10 @@ class RLOptimizer:
         self.stats = {
             'total_optimizations': 0,
             'avg_optimization_time_ms': 0.0,
+            'timeout_count': 0,
         }
+        # 用于获取 kv cache
+        self.kv_cache_manager = kv_cache_manager
     
     def optimize_schedule(self,
                           running_requests,
@@ -71,6 +70,7 @@ class RLOptimizer:
         actual_batch_size = len(scheduled_requests)
         actual_tokens = sum(allocation.values())
 
+        result = None
         if actual_batch_size <= batch_size and actual_tokens <= token_budget:
             decode_count, prefill_count = self._count_request_types(
                             running_requests, waiting_requests, allocation
@@ -93,16 +93,11 @@ class RLOptimizer:
                 logger.warning(f"Optimization timeout: {result.optimization_time_ms:.2f}ms "
                             f"for B={batch_size}, S={token_budget}")
             
-            self._update_stats(result.optimization_time_ms)
-                
-            if self.config.verbose_logging:
-                logger.debug(f"Optimization success: B={result.actual_batch_size}, "
-                            f"S={sum(result.allocation.values())}, ")
+            # self._update_stats(result.optimization_time_ms)
                 
             return result
         else:
-            if self.config.verbose_logging:
-                logger.info(f"Optimization failed: no valid allocation found")
+            logger.info(f"Optimization failed: no valid allocation found")
             return None
     
     def _greedy_allocation(self, 
@@ -110,22 +105,8 @@ class RLOptimizer:
                           waiting_requests,
                           batch_size: int,
                           token_budget: int) -> Dict[str, int]:
-        """贪心分配算法
-        
-        实现论文中描述的三阶段贪心策略：
-        1. Running中的decode请求（每个需要1 token）
-        2. Running中的prefill请求
-        3. Waiting中的新请求（按优先级排序）
-        
-        Args:
-            running_requests: 运行中的请求
-            waiting_requests: 等待中的请求
-            batch_size: 目标batch size
-            token_budget: token预算
-            
-        Returns:
-            request_id -> tokens的分配字典
-        """
+        """贪心分配算法"""
+
         allocation = {}
         remaining_budget = token_budget
         remaining_slots = batch_size
@@ -159,9 +140,7 @@ class RLOptimizer:
                 continue
             
             remaining_tokens = self._get_remaining_prefill_tokens(req)
-            # 限制chunk大小以避免过度占用资源
-            max_chunk = min(remaining_tokens, 2048)  # 最大chunk限制
-            chunk_size = min(max_chunk, remaining_budget)
+            chunk_size = min(remaining_tokens, remaining_budget)
             
             allocation[req.request_id] = chunk_size
             remaining_budget -= chunk_size
@@ -180,21 +159,9 @@ class RLOptimizer:
         
         return allocation
     
-    def _select_waiting_requests(self, 
-                               waiting_requests,
-                               remaining_slots: int,
-                               remaining_budget: int) :
-        """选择等待队列中的请求
+    def _select_waiting_requests(self, waiting_requests,remaining_slots: int,remaining_budget: int) :
         
-        Args:
-            waiting_requests: 等待中的请求列表
-            remaining_slots: 剩余slot数
-            remaining_budget: 剩余token预算
-            
-        Returns:
-            选中的请求及其token分配列表
-        """
-        if not waiting_requests or remaining_slots <= 0 or remaining_budget <= 0:
+        if not waiting_requests :
             return []
         
         # 按优先级排序（如果有优先级字段）
@@ -206,6 +173,7 @@ class RLOptimizer:
         except AttributeError:
             # 如果没有priority字段，按FIFO顺序
             sorted_waiting = waiting_requests
+            logger.info("Sorting waiting requests by priority, FIFO order")
         
         selected = []
         
@@ -213,26 +181,40 @@ class RLOptimizer:
             if remaining_slots <= 0 or remaining_budget <= 0:
                 break
             
-            # 计算启动该请求需要的最小token数
-            prompt_tokens = getattr(req, 'num_prompt_tokens', 0)
-            if prompt_tokens <= 0:
-                # 如果无法获取prompt长度，使用默认最小值
-                min_startup_tokens = 16
+            # 新的分配方式，考虑kv cache
+            if req.num_computed_tokens == 0:
+                # 新的请求，获取本地缓存的token
+                new_computed_blocks, num_computed_tokens = self.kv_cache_manager.get_computed_blocks(req)
             else:
-                min_startup_tokens = min(16, prompt_tokens)
+                num_computed_tokens = req.num_computed_tokens
+            num_new_tokens = req.num_tokens - num_computed_tokens
+            chunk_size = min(num_new_tokens, remaining_budget)
+            selected.append((req, chunk_size))
+            remaining_budget -= chunk_size
+            remaining_slots -= 1
+
+            # # 计算启动该请求需要的最小token数
+            # logger.info(f"num_tokens:{req.num_tokens},num_prompt_tokens:{req.num_prompt_tokens}")
+            # prompt_tokens = getattr(req, 'num_prompt_tokens', 0)
+            # if prompt_tokens <= 0:
+            #     # 如果无法获取prompt长度，使用默认最小值
+            #     logger.info(f"can't get the prompt_tokens of req {req.request_id}, use default value 16")
+            #     min_startup_tokens = 16
+            # else:
+            #     min_startup_tokens = min(16, prompt_tokens)
             
-            if remaining_budget < min_startup_tokens:
-                # 剩余预算不足以启动新请求
-                break
+            # if remaining_budget < min_startup_tokens:
+            #     # 剩余预算不足以启动新请求
+            #     break
             
-            # 计算该请求的token分配
-            max_chunk = min(prompt_tokens, 512) if prompt_tokens > 0 else 256
-            chunk_size = min(max_chunk, remaining_budget)
+            # # 计算该请求的token分配
+            # max_chunk = min(prompt_tokens, 512) if prompt_tokens > 0 else 256
+            # chunk_size = min(max_chunk, remaining_budget)
             
-            if chunk_size >= min_startup_tokens:
-                selected.append((req, chunk_size))
-                remaining_budget -= chunk_size
-                remaining_slots -= 1
+            # if chunk_size >= min_startup_tokens:
+            #     selected.append((req, chunk_size))
+            #     remaining_budget -= chunk_size
+            #     remaining_slots -= 1
         
         return selected
     
