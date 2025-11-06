@@ -201,9 +201,11 @@ class Scheduler(SchedulerInterface):
         # Profiling相关设置
         self.enable_profiling = os.getenv('VLLM_ENABLE_SCHEDULER_PROFILING', 'false').lower() == 'true'
         profiling_log_dir = os.getenv('VLLM_SCHEDULER_PROFILING_LOG', 'profiling')
+        date_dir = os.path.join(profiling_log_dir,datetime.now().strftime("%Y-%m-%d"))
+        os.makedirs(date_dir, exist_ok=True)
         formatted_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        os.makedirs(profiling_log_dir, exist_ok=True)
-        self.profiling_log_file = os.path.join(profiling_log_dir, f"profiling_{formatted_time}.jsonl")
+        
+        self.profiling_log_file = os.path.join(date_dir, f"profiling_{formatted_time}.jsonl")
         if self.enable_profiling and self.profiling_log_file:
             logger.info(f"The profiling log file: {self.profiling_log_file}")
         self.profiling_console = os.getenv('VLLM_SCHEDULER_PROFILING_CONSOLE', 'false').lower() == 'true' # 控制终端输出
@@ -1531,11 +1533,11 @@ class Scheduler(SchedulerInterface):
                 chunk_sizes.append(req_tokens)
                 all_computed_tokens.append(req.num_computed_tokens)
                 all_cached_tokens.append(req.num_cached_tokens)
-        
+        now_time = time.time()
         # 准备统计信息（不包含model run时间）
         self.current_batch_profiling_data = {
             "batch_id": self.batch_counter,
-            "timestamp": f"{schedule_end_time:.3f}",
+            "timestamp": f"{now_time:.3f}",
             "select_B": select_B,
             "select_S": select_S,
             "scheduled_tokens": total_num_scheduled_tokens,

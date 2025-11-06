@@ -3,6 +3,7 @@
 
 import enum
 import time
+import bisect
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -13,6 +14,8 @@ from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
+from vllm.logger import init_logger 
+logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
 
@@ -85,15 +88,31 @@ class Request:
         self.num_cached_tokens = -1
 
         # 添加额外的属性
+        self._set_other_attribute()
+
+    def _set_other_attribute(self):
+        # 设置到达时间
         self.arrival_time = time.monotonic()
-        if self.num_prompt_tokens < 3000:
-            self.slo = 10.0  # 10秒SLO
-        elif self.num_prompt_tokens < 6000:
-            self.slo = 20.0  # 20秒SLO
-        elif self.num_prompt_tokens < 10000:
-            self.slo = 30.0  # 30秒SLO
+
+        # 设置slo
+        slo_dict = {2000:5,
+                    4000:6,
+                    6000:7,
+                    8000:8,
+                    10000:9,
+                    12000:10,
+                    14000:11,
+                    16000:12,
+                    18000:13,
+                    20000:14}
+        sorted_keys = [2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 
+                       18000, 20000]
+
+        index = bisect.bisect_left(sorted_keys, self.num_prompt_tokens)
+        if index < len(sorted_keys):
+            self.slo = slo_dict[sorted_keys[index]]
         else:
-            self.slo = None
+            self.slo = slo_dict[sorted_keys[-1]]
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":

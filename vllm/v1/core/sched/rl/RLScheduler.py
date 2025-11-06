@@ -1,6 +1,10 @@
 import time
 from typing import Dict, Any
 import logging
+import os
+import time
+import json
+from datetime import datetime
 
 try:
     from .RLConfig import RLSchedulerConfig
@@ -47,6 +51,8 @@ class RLScheduler:
             'successful_optimizations': 0,
             'total_performance_records': 0,
         }
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        self.time_out_info_path = os.path.join(current_dir, "timeout_info.jsonl")
         
         if self.enabled:
             logger.info(f"RL Scheduler initialized successfully!")
@@ -65,8 +71,10 @@ class RLScheduler:
             # Phase 1:从 RLAgent中选择 batch_size,token_budget
             if self.rl_agent.train_enabled:
                 self.env.set_before_env_info(env_info)
+            time2 = time.monotonic()
             (batch_size, token_budget) = self.rl_agent.select(env_info,len(env_info["running_requests"]))
-
+            time3 = time.monotonic()
+            time_rl_agent_select = (time3 - time2)*1000
             # Phase 2:使用 optimizer 计算具体分配
             result = self.optimizer.optimize_schedule(
                 running_requests=env_info["running_requests"],
@@ -74,6 +82,11 @@ class RLScheduler:
                 batch_size=batch_size,
                 token_budget=token_budget
             )
+            time4 = time.monotonic()
+            time_optimizer_optimize_schedule = (time4 - time3)*1000
+
+            if time_optimizer_optimize_schedule >=5 or time_rl_agent_select>=2 :
+                self._write_timeout_info(time_optimizer_optimize_schedule,time_rl_agent_select)
             
             if result:
                 self.stats['successful_optimizations'] += 1
@@ -121,3 +134,18 @@ class RLScheduler:
             self.trainer.add_exp(before_env_info, after_env_info, self.rl_agent.action)
             
         self.stats['total_performance_records'] += 1
+
+    def _write_timeout_info(self,time_optimizer_optimize_schedule,time_rl_agent_select):
+        
+        timestamp = time.time()
+        data = {
+            "timestamp":f"{timestamp:.3f}",
+            "time":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time_optimizer_optimize_schedule": f"{time_optimizer_optimize_schedule:.3f}",
+            "time_rl_agent_select": f"{time_rl_agent_select:.3f}",
+        }
+        try:
+            with open(self.time_out_info_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(data, ensure_ascii=False) + '\n')
+        except Exception as e:
+            logger.warning(f"Failed to write timeout info : {e}")

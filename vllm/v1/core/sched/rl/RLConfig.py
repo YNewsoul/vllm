@@ -25,20 +25,24 @@ class RLSchedulerConfig:
 
     # === agent 参数 ===
     device: str = "cpu"                # 训练所用设备（cuda/cpu）
-    train_enabled: bool = True         # 是否进行训练
-    state_dim: int = 4                 # 状态维度（根据环境定义）
-    action_dim: int = 16               # 动作维度（根据环境定义）
+    train_enabled: bool = False         # 是否进行训练
+    rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
+    use_pretrained_model: bool = False  # 是否使用预训练模型
+    pretrained_model_path: str = ""     # 预训练模型路径
+    save_model_frequency: float = 180.0  # 保存模型频率（单位：秒）
+    log_frequency: int = 40           # 日志记录频率（单位：step）
+
+    # === DQN 参数 ===
     lr: float = 1e-4                   # 学习率
     gamma: float = 0.9                 # 折扣因子（长期奖励权重）
     epsilon: float = 0.2               # 初始探索概率
     epsilon_max_step: int = 100000       # 最大探索步数
     epsilon_min: float = 0.1          # 最小探索概率
     target_net_update_freq: int = 100  # 目标网络更新频率（单位：step）
-    rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
-    use_pretrained_model: bool = False  # 是否使用预训练模型
-    pretrained_model_path: str = ""     # 预训练模型路径
-    save_model_frequency: float = 180.0  # 保存模型频率（单位：秒）
-    log_frequency: int = 20           # 日志记录频率（单位：step）
+
+    # === MLPNetwork 参数
+    state_dim: int = 4                 # 状态维度（根据环境定义）
+    action_dim: int = 28               # 动作维度（根据环境定义）
 
     # === env 参数 ===
     llm_model_len: int = 10000              # LLM模型长度
@@ -85,20 +89,24 @@ class RLSchedulerConfig:
 
             # agent 参数
             device=os.getenv('VLLM_RL_DEVICE', 'cpu').lower(),
-            train_enabled=os.getenv('VLLM_RL_TRAIN_ENABLED', 'true').lower() == 'true',
-            state_dim=int(os.getenv('VLLM_RL_STATE_DIM', '4')),
-            action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '16')),
-            lr=float(os.getenv('VLLM_RL_LR', '1e-4')),
-            gamma=float(os.getenv('VLLM_RL_GAMMA', '0.99')),
-            epsilon=float(os.getenv('VLLM_RL_EPSILON', '0.2')),
-            epsilon_max_step=int(os.getenv('VLLM_RL_EPSILON_MAX_STEP', '100000')),
-            epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.1')),
-            target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '100')),
+            train_enabled=os.getenv('VLLM_RL_TRAIN_ENABLED', 'false').lower() == 'true',
             rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),
             use_pretrained_model=os.getenv('VLLM_RL_USE_PRETRAINED_MODEL', 'false').lower() == 'true',
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
             save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '180.0')),
-            log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '20')),
+            log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '40')),
+
+            # DQN 参数
+            lr=float(os.getenv('VLLM_RL_LR', '1e-4')),
+            gamma=float(os.getenv('VLLM_RL_GAMMA', '0.9')),
+            epsilon=float(os.getenv('VLLM_RL_EPSILON', '0.2')),
+            epsilon_max_step=int(os.getenv('VLLM_RL_EPSILON_MAX_STEP', '100000')),
+            epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.1')),
+            target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '100')),
+
+            # MLPNetwork 参数
+            state_dim=int(os.getenv('VLLM_RL_STATE_DIM', '4')),
+            action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '28')),
 
             # env 参数
             llm_model_len=int(os.getenv('VLLM_RL_LLM_MODEL_LEN', '10000')),
@@ -108,7 +116,7 @@ class RLSchedulerConfig:
             slo_norm=float(os.getenv('VLLM_RL_SLO_NORM', '30.0')),
             prompt_norm=float(os.getenv('VLLM_RL_PROMPT_NORM', '10000.0')),
 
-            # reward 函数参数
+            # reward 参数
             lambda_recent_comform_slo=float(os.getenv('VLLM_RL_LAMBDA_RECENT_CONFORM_SLO', '2')),
             lambda_recent_throughput=float(os.getenv('VLLM_RL_LAMBDA_RECENT_THROUGHPUT', '1')),
             lambda_R_match_penalty=float(os.getenv('VLLM_RL_LAMBDA_R_MATCH_PENALTY', '0.5')),

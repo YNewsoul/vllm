@@ -47,12 +47,16 @@ class RLAgent:
             (4, 256), (4, 512), (4, 1024), (4, 2048),
             (6, 256), (6, 512), (6, 1024), (6, 2048),
             (8, 256), (8, 512), (8, 1024), (8, 2048),
-            (10, 256), (10, 512), (10, 1024), (10, 2048)
+            (10, 256), (10, 512), (10, 1024), (10, 2048),
+            (12,256), (12,512), (12,1024), (12,2048),
+            (14,256), (14,512), (14,1024), (14,2048),
+            (16,256), (16,512), (16,1024), (16,2048),
         ]
 
         self.is_ready = True
         self.last_save_model_time = 0
         self.log_frequency = self.config.log_frequency
+        self.model_save_dir = None
 
 
     def _initialize_model(self):
@@ -62,6 +66,9 @@ class RLAgent:
         if self.config.rl_model == "MLPNetwork":  
             self.main_model = MLPNetwork(self.config.state_dim, self.config.action_dim).to(self.device)
             self.target_model = MLPNetwork(self.config.state_dim, self.config.action_dim).to(self.device)
+            self.state_dim = self.config.state_dim
+            self.action_dim = self.config.action_dim
+            logger.info(f"Initializing model MLPNetwork successfully!")
         elif self.config.rl_model == "DualAttentionNetwork":
             
             self.main_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting, 
@@ -70,13 +77,9 @@ class RLAgent:
             self.target_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting,
                                                     self.config.Feature_waiting, self.config.K_running, 
                                                     self.config.Feature_running, self.config.action_dim).to(self.device)
-            print("Initializing model DualAttentionNetwork successfully!")
             logger.info(f"Initializing model DualAttentionNetwork successfully!")
         else:
             raise ValueError(f"Unsupported rl_model: {self.config.rl_model}")
-        
-        if self.config.verbose_logging:
-            logger.info(f"Initializing model: {self.config.rl_model}")
         
         # 尝试加载预训练模型参数
         if self.config.use_pretrained_model and self.config.pretrained_model_path:
@@ -90,21 +93,9 @@ class RLAgent:
                     self.load_model(self.main_model, model_path)
                     self.target_model.load_state_dict(self.main_model.state_dict())
 
-                    if self.config.verbose_logging:
-                        logger.info(f"Loaded pretrained model parameters from: {model_path}")
-
             except Exception as e:
                 logger.error(f"Failed to load pretrained model: {e}")
-        else:
-            if self.config.verbose_logging:
-                if not self.config.use_pretrained_model:
-                    logger.info("Pretrained model disabled by configuration")
-                elif not self.config.pretrained_model_path:
-                    logger.info("No pretrained model path specified")
-            
-        if self.config.rl_model == "MLPNetwork":
-            self.state_dim = self.config.state_dim
-            self.action_dim = self.config.action_dim
+
         self.lr = self.config.lr
 
         # DQN超参数（对齐文档约束）
@@ -119,13 +110,25 @@ class RLAgent:
         self._update_count = 1  
 
     def _initialize_log_file(self):
-        training_logs_str = "training_logs"
+        # 当前目录
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        training_logs_dir = os.path.join(current_dir, training_logs_str)
-        current_time = datetime.now()
-        formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        # 创建存储日志目录
+        training_logs_dir = os.path.join(current_dir, "training_logs")
         os.makedirs(training_logs_dir, exist_ok=True)
-        self.training_log_file_path = os.path.join(training_logs_dir, f"training_log_{formatted_time}.jsonl")
+        # 创建当前日期目录
+        current_time = datetime.now()
+        date_dir = os.path.join(training_logs_dir, current_time.strftime("%Y-%m-%d"))
+        os.makedirs(date_dir, exist_ok=True)
+        # 创建具体时间目录
+        formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        time_dir = os.path.join(date_dir, formatted_time)
+        os.makedirs(time_dir, exist_ok=True)
+        # 创建模型保存目录
+        self.model_save_dir = os.path.join(time_dir, "model")
+        os.makedirs(self.model_save_dir, exist_ok=True)
+        # 写入训练的配置信息
+        self._write_training_info(time_dir)
+        self.training_log_file_path = os.path.join(time_dir, f"training_log_{formatted_time}.jsonl")
         logger.info(f"The training log file was successfully initialized in {self.training_log_file_path}")
             
     def select(self, env_info: Dict, running_requests_len: int):
@@ -256,7 +259,8 @@ class RLAgent:
         
         # 8. 打印监控信息
         if self.train_step % self.log_frequency == 0:
-            log_data = {"train_step":self.train_step,
+            log_data = {"time":time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                    "train_step":self.train_step,
                     "loss":f"{loss.detach().item():.5f}",
                     "avg_target_q":f"{target_q.mean().detach().item():.5f}",
                     "avg_rewards":f"{rewards.mean().detach().item():.5f}"}
@@ -271,13 +275,8 @@ class RLAgent:
 
     def save_model(self,) -> None:
         """保存模型权重"""
-        model_str = "model"
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        model_dir = os.path.join(current_dir, model_str)
-        current_time = datetime.now()
-        formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
-        os.makedirs(model_dir, exist_ok=True)
-        save_path = os.path.join(model_dir, f"model_{formatted_time}")
+        formatted_time = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        save_path = os.path.join(self.model_save_dir, f"model_{formatted_time}")
         torch.save(self.main_model.state_dict(), save_path)
         logger.info(f"save model successfully, to {save_path}")
     
@@ -429,3 +428,43 @@ class RLAgent:
         self._initialize_log_file()
         self.train_step = 0
         self.last_save_model_time = time.monotonic()
+    
+    def _write_training_info(self,time_dir):
+        """写入训练的配置信息"""
+        training_info = {
+            "agent":{"device":self.config.device,
+                    "rl_model":self.config.rl_model,
+                    "use_pretrained_model":self.config.use_pretrained_model,
+                    "pretrained_model_path":self.config.pretrained_model_path,
+                    "save_model_frequency":self.config.save_model_frequency,
+                    "log_frequency":self.config.log_frequency,
+            },
+            "Trainer":{"train_total_time":self.config.train_total_time,
+                       "train_batch_size":self.config.train_batch_size,
+                       "replay_buffer_size":self.config.replay_buffer_size,
+            },
+            "DQN":{"lr":self.config.lr,
+                   "gamma":self.config.gamma,
+                   "epsilon":self.config.epsilon,
+                   "epsilon_max_step":self.config.epsilon_max_step,
+                   "epsilon_min":self.config.epsilon_min,
+                   "target_net_update_freq":self.config.target_net_update_freq,
+            },
+            "reward":{"lambda_recent_comform_slo":self.config.lambda_recent_comform_slo,
+                      "lambda_recent_throughput":self.config.lambda_recent_throughput,
+                      "lambda_R_match_penalty":self.config.lambda_R_match_penalty,
+                      "lambda_R_comform_violate":self.config.lambda_R_comform_violate,
+            },
+            "MLPNetwork":{"state_dim":self.config.state_dim,
+                          "action_dim":self.config.action_dim,
+            },
+            "DualAttentionNetwork":{"Global_state_dim":self.config.Global_state_dim,
+                                     "K_waiting":self.config.K_waiting,
+                                     "Feature_waiting":self.config.Feature_waiting,
+                                     "K_running":self.config.K_running,
+                                     "Feature_running":self.config.Feature_running
+            },
+        }
+        train_info_path = os.path.join(time_dir, "training_info.jsonl")
+        with open(train_info_path, "a", encoding="utf-8") as f:
+            json.dump(training_info, f, ensure_ascii=False, indent=4)
