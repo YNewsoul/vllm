@@ -43,15 +43,7 @@ class RLAgent:
         self.criterion = torch.nn.MSELoss()  # 均方误差损失（拟合Q值）
         self.train_step = 0    # 训练步数计数器
 
-        self.action_map = [
-            (4, 256), (4, 512), (4, 1024), (4, 2048),
-            (6, 256), (6, 512), (6, 1024), (6, 2048),
-            (8, 256), (8, 512), (8, 1024), (8, 2048),
-            (10, 256), (10, 512), (10, 1024), (10, 2048),
-            (12,256), (12,512), (12,1024), (12,2048),
-            (14,256), (14,512), (14,1024), (14,2048),
-            (16,256), (16,512), (16,1024), (16,2048),
-        ]
+        self.action_map = [256,512,1024,2048]
 
         self.is_ready = True
         self.last_save_model_time = 0
@@ -131,7 +123,7 @@ class RLAgent:
         self.training_log_file_path = os.path.join(time_dir, f"training_log_{formatted_time}.jsonl")
         logger.info(f"The training log file was successfully initialized in {self.training_log_file_path}")
             
-    def select(self, env_info: Dict, running_requests_len: int):
+    def select(self, env_info: Dict):
 
         # === 1. 获取网络输入 ===
         global_vec, wait_arr, run_arr, wait_mask, run_mask = self.env_info_to_state(env_info)
@@ -149,34 +141,14 @@ class RLAgent:
         if self.train_enabled:
             epsilon = max(self.epsilon - self.train_step/self.epsilon_max_step, self.epsilon_min)
             if np.random.rand() < epsilon:
-                # 优先从batch_size大于等于running_requests_len的动作中随机选择
-                valid_actions = [(i, action) for i, action in enumerate(self.action_map) 
-                             if action[0] >= running_requests_len]
-            
-                # 如果有符合条件的动作，从中随机选择
-                if valid_actions:
-                    idx, action = random.choice(valid_actions)
-                    self.action = action
-                    return self.action
-                # 否则回退到完全随机选择
                 self.action = random.choice(self.action_map)
-
                 return self.action
             
         with torch.no_grad():
             q_values = self.main_model(global_vec, wait_arr, run_arr, wait_mask, run_mask).squeeze(0).cpu().numpy()  # [1, action_dim]
-             # 优先从batch_size大于等于running_requests_len的动作中选择Q值最高的
-            valid_indices = [i for i, action in enumerate(self.action_map) 
-                             if action[0] >= running_requests_len]
-            if valid_indices:
-                # 在有效动作中选择Q值最高的
-                valid_q_values = q_values[valid_indices]
-                best_valid_idx = valid_indices[np.argmax(valid_q_values)]
-                self.action = self.action_map[best_valid_idx]
-            else:
-                # 没有符合条件的动作，选择Q值最高的动作
-                best_idx = np.argmax(q_values)
-                self.action = self.action_map[best_idx]
+            
+            best_idx = np.argmax(q_values)
+            self.action = self.action_map[best_idx]
             
             return self.action
 
@@ -353,7 +325,6 @@ class RLAgent:
         recent_avg_latency = float(env_info.get("recent_avg_latency", 0.0)) / self.config.slo_norm
         recent_comform_slo_rate = float(env_info.get("recent_comform_slo_rate", 0.0))
 
-        last_B = float(env_info.get("last_B", 0.0))/self.config.B_norm
         last_S = float(env_info.get("last_S", 0.0))/self.config.S_norm
         
         global_vec = np.array([
@@ -365,7 +336,7 @@ class RLAgent:
             avg_wait_remaining,min_wait_remaining,
             avg_run_remaining,min_run_remaining,
             recent_throughput,recent_avg_latency,recent_comform_slo_rate,
-            last_B,last_S,
+            last_S,
         ], dtype=np.float32)
 
         waiting_feats, wait_mask = [], []

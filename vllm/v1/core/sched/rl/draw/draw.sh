@@ -1,2 +1,2 @@
 python /home/paperspace/cys/projects/rl/vllm-workspace/vllm/vllm/v1/core/sched/rl/draw/draw.py \
-    --log-file "/home/paperspace/cys/projects/rl/vllm-workspace/vllm/vllm/v1/core/sched/rl/training_logs/2025-11-05/2025-11-05 00:57:31/training_log_2025-11-05 00:57:31.jsonl"
+    --log-file "/home/paperspace/cys/projects/rl/vllm-workspace/vllm/vllm/v1/core/sched/rl/training_logs/2025-11-05/2025-11-05 20:22:09/training_log_2025-11-05 20:22:09.jsonl"

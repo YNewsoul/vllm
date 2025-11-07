@@ -68,18 +68,21 @@ class RLScheduler:
         
         if self.rl_agent.is_ready:
 
-            # Phase 1:从 RLAgent中选择 batch_size,token_budget
-            if self.rl_agent.train_enabled:
-                self.env.set_before_env_info(env_info)
+            # Phase 1:从 RLAgent中选择 token_budget
             time2 = time.monotonic()
-            (batch_size, token_budget) = self.rl_agent.select(env_info,len(env_info["running_requests"]))
+            token_budget = self._RL_schedule_judge(env_info)
+            use_rl_scheduler = False
+            if token_budget is None:
+                if self.rl_agent.train_enabled:
+                    self.env.set_before_env_info(env_info)
+                token_budget = self.rl_agent.select(env_info)
+                use_rl_scheduler = True
             time3 = time.monotonic()
             time_rl_agent_select = (time3 - time2)*1000
             # Phase 2:使用 optimizer 计算具体分配
             result = self.optimizer.optimize_schedule(
                 running_requests=env_info["running_requests"],
                 waiting_requests=env_info["waiting_requests"],
-                batch_size=batch_size,
                 token_budget=token_budget
             )
             time4 = time.monotonic()
@@ -98,11 +101,10 @@ class RLScheduler:
                     'allocation': result.allocation,
                     'token_budget': result.select_S,
                     'prioritize_decode': result.decode_count > 0,
-                    'actual_B': result.actual_B,
                     'actual_S': result.actual_S,
-                    'select_B': result.select_B,
                     'decode_count': result.decode_count,
                     'prefill_count': result.prefill_count,
+                    'use_rl_scheduler': use_rl_scheduler,
                 }
             else:
                 logger.info(f"RL Scheduler optimize schedule failed")
@@ -149,3 +151,51 @@ class RLScheduler:
                 f.write(json.dumps(data, ensure_ascii=False) + '\n')
         except Exception as e:
             logger.warning(f"Failed to write timeout info : {e}")
+
+    def _RL_schedule_judge(self,env_info):
+        running = env_info['running_requests']
+        waiting = env_info['waiting_requests']
+        max_num_scheduled_tokens = env_info['max_num_scheduled_tokens']
+        num_running = len(running)
+        num_waiting = len(waiting)
+        if num_running == 0 and num_waiting == 0:
+            # 1、 无请求运行，无等待请求
+            return max_num_scheduled_tokens
+        elif num_running == 0 and num_waiting != 0:
+            # 2、新请求到来，且此时没有正在运行的请求
+            return max_num_scheduled_tokens
+        else:
+            num_prefill,num_decode = self._count_running_types(running)
+            
+            if num_running!=0 and num_waiting == 0:
+                # 3、 有请求运行，无等待请求
+                if num_prefill != 0 and num_decode == 0:
+                    # 3.1、 运行请求只含一个请求，且处于 prefill 阶段
+                    return max_num_scheduled_tokens
+                elif num_prefill == 0 and num_decode != 0:
+                    # 3.2、 所有运行请求都处于 decode 阶段
+                    return max_num_scheduled_tokens
+                # 3.3、运行请求有 prefill 和 decode 请求，需要RL scheduler
+                return None
+            
+            elif num_running != 0 and num_waiting != 0:
+                # 4、 有请求运行，有等待请求
+                if num_prefill != 0 and num_decode == 0:
+                    # 4.1 运行的请求只含一个请求，且处于 prefill 阶段，且无 decode 阶段请求
+                    return max_num_scheduled_tokens
+                elif num_prefill == 0 and num_decode != 0:
+                    # 4.2 所有运行请求都处于 decode 阶段
+                    return max_num_scheduled_tokens
+                # 4.3 运行的请求有 prefill 和 decode 请求，需要RL scheduler
+                return None
+
+    def _count_running_types(self,running):
+        num_prefill = 0
+        num_decode = 0
+         
+        for req in running:
+            if req.num_computed_tokens >= req.num_prompt_tokens:
+                num_decode += 1
+            else:
+                num_prefill += 1
+        return num_prefill,num_decode

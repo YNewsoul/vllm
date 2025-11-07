@@ -27,11 +27,8 @@ class RLDataCollection:
         self.total_latency = 0.0
 
         # B/S 相关
-        self.B_S = {'select_B': 0.0,
-                    'select_S': 0.0,
-                    'actual_B': 0.0,
+        self.B_S = {'select_S': 0.0,
                     'actual_S': 0.0,
-                    'last_B': 0.0,
                     'last_S': 0.0}
         
         self.decode_count = 0
@@ -75,11 +72,8 @@ class RLDataCollection:
         return self.total_latency / len(self.latency_buffer)
     
     def update_BS(self,obs_data:Dict):
-        self.B_S['last_B'] = self.B_S['select_B']
         self.B_S['last_S'] = self.B_S['select_S']
-        self.B_S['select_B'] = obs_data['select_B']
         self.B_S['select_S'] = obs_data['token_budget']
-        self.B_S['actual_B'] = obs_data['actual_B']
         self.B_S['actual_S'] = obs_data['actual_S']
         
     def get_BS(self):

@@ -36,11 +36,8 @@ class Env:
             'current_throughput': env_info.get('current_throughput', 0.0),
             'decode_count': env_info.get('decode_count', 0),
             'prefill_count': env_info.get('prefill_count', 0),
-            'last_B': env_info.get('last_B', 0.0),
             'last_S': env_info.get('last_S', 0.0),
-            'select_B': env_info.get('select_B', 0.0),
             'select_S': env_info.get('select_S', 0.0),
-            'actual_B': env_info.get('actual_B', 0.0),
             'actual_S': env_info.get('actual_S', 0.0),
             # 仅创建请求的轻量级快照
             'running_requests': [

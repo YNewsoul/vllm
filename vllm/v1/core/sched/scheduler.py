@@ -235,11 +235,8 @@ class Scheduler(SchedulerInterface):
                 'recent_avg_latency': 0.0,
                 'recent_comform_slo_rate': 0.0,
                 'current_throughput': 0.0,
-                'last_B':0.0,
                 'last_S':0.0,
-                'select_B':0.0,
                 'select_S':0.0,
-                'actual_B':0.0,
                 'actual_S':0.0}
 
         # 初始化SLA感知调度器
@@ -278,6 +275,8 @@ class Scheduler(SchedulerInterface):
                 self.elrar_agent = None
         else:
             logger.debug("ELRAR Engine Agent not available")
+        
+        self.use_rl_scheduler = False
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -349,6 +348,7 @@ class Scheduler(SchedulerInterface):
                 # 从RL决策中提取token预算和是否优先decode阶段
                 token_budget = rl_schedule_decision['token_budget']
                 prioritize_decode = rl_schedule_decision['prioritize_decode']
+                self.use_rl_scheduler = rl_schedule_decision['use_rl_scheduler']
                 self.rl_data_collection.update_BS(rl_schedule_decision)
                 self.rl_data_collection.set_decode_count(rl_schedule_decision['decode_count'])
                 self.rl_data_collection.set_prefill_count(rl_schedule_decision['prefill_count'])
@@ -706,12 +706,12 @@ class Scheduler(SchedulerInterface):
                     rl_allocated_tokens = None
                     if rl_schedule_decision and 'allocation' in rl_schedule_decision:
                         rl_allocated_tokens = rl_schedule_decision['allocation'].get(request.request_id, None)
-                        if not rl_allocated_tokens:
-                            # 表明之后从这开始，RL调度器不会再为剩下的请求分配token
-                            # 这会存在一种 token_budget 使用不完全的情况(有剩余token_budget但是B达到上限)
-                            # 此情况下，倘若不跳出，则 vllm 会再为剩余 请求分配token，可能会导致死机
-                            # 因此，这里跳出循环，确保不会再为剩余请求分配token
-                            break
+                        # if not rl_allocated_tokens:
+                        #     # 表明之后从这开始，RL调度器不会再为剩下的请求分配token
+                        #     # 这会存在一种 token_budget 使用不完全的情况(有剩余token_budget但是B达到上限)
+                        #     # 此情况下，倘若不跳出，则 vllm 会再为剩余 请求分配token，可能会导致死机
+                        #     # 因此，这里跳出循环，确保不会再为剩余请求分配token
+                        #     break
                     
                     # 如果RL调度器提供了具体分配，优先使用
                     
@@ -918,9 +918,8 @@ class Scheduler(SchedulerInterface):
 
         # Profiling: 记录调度统计信息，但不立即写入文件（等待model run完成）
         if self.enable_profiling or not self.sla_scheduler.config.use_pretrained_model:
-            select_B = select_S = 0.0
+            select_S = 0.0
             if rl_schedule_decision:
-                select_B = rl_schedule_decision['select_B']
                 select_S = rl_schedule_decision['token_budget']
             schedule_end_time = time.monotonic()
             self.last_schedule_end_time = schedule_end_time
@@ -932,7 +931,6 @@ class Scheduler(SchedulerInterface):
                 scheduled_running_reqs,
                 num_scheduled_tokens,
                 total_num_scheduled_tokens,
-                select_B,
                 select_S
             )
         
@@ -1514,7 +1512,6 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list,
         num_scheduled_tokens: dict[str, int],
         total_num_scheduled_tokens: int,
-        select_B:float,
         select_S:float
     ) -> None:
         """准备调度profiling信息，但不写入文件（等待model run完成）"""
@@ -1538,7 +1535,6 @@ class Scheduler(SchedulerInterface):
         self.current_batch_profiling_data = {
             "batch_id": self.batch_counter,
             "timestamp": f"{now_time:.3f}",
-            "select_B": select_B,
             "select_S": select_S,
             "scheduled_tokens": total_num_scheduled_tokens,
             "chunk_sizes": chunk_sizes,
@@ -1601,7 +1597,7 @@ class Scheduler(SchedulerInterface):
             actual_latency = model_run_duration * 1000  # 转换为ms
             
             # 验证数据有效性
-            if batch_size > 0 and total_tokens > 0 and actual_latency > 0:
+            if batch_size > 0 and total_tokens > 0 and actual_latency > 0 :
                 # 记录到SLA调度器
                 self.sla_scheduler.record_performance(batch_size, total_tokens, actual_latency)
             else:
@@ -1625,7 +1621,8 @@ class Scheduler(SchedulerInterface):
             self.rl_data_collection.add_latency(actual_latency)
 
             self.update_rl_env_info(True)
-            self.rl_scheduler.record_performance(self.rl_env_info)
+            if self.use_rl_scheduler:
+                self.rl_scheduler.record_performance(self.rl_env_info)
                 
         except Exception as e:
             logger.warning(f"Failed to record RL scheduler performance: {e}")
@@ -1710,6 +1707,7 @@ class Scheduler(SchedulerInterface):
         self.rl_env_info['running_requests'] = self.running
         self.rl_env_info['waiting_requests'] = list(self.waiting)
         self.rl_env_info['now_time'] = time.monotonic()
+        self.rl_env_info['max_num_scheduled_tokens'] = self.max_num_scheduled_tokens
         if After:
             self.rl_env_info['recent_throughput'] = self.rl_data_collection.get_throughput()
             self.rl_env_info['recent_avg_latency'] = self.rl_data_collection.get_avg_latency()

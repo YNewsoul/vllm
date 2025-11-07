@@ -80,11 +80,8 @@ class Trainer:
         # 'recent_avg_latency': 0.0,
         # 'recent_comform_slo_rate': 0.0,
         # 'current_throughput': 0.0,
-        # 'last_B':0.0,
         # 'last_S':0.0,
-        # 'select_B':0.0,
         # 'select_S':0.0,
-        # 'actual_B':0.0,
         # 'actual_S':0.0}
 
         # ========== 1 长期奖励 ==========
@@ -96,17 +93,12 @@ class Trainer:
 
         # ========== 2 短期奖励 ==========
         # ---------- 2.1 匹配B、S惩罚 ----------
-        select_B = after_env_info.get("select_B", 0)
         select_S = after_env_info.get("select_S", 0)
-        actual_B = after_env_info.get("actual_B", 0)
         actual_S = after_env_info.get("actual_S", 0)
-        R_match_B_penalty = 0
         R_match_S_penalty = 0
-        if abs(select_B - actual_B) > 1:
-            R_match_B_penalty = -1
         if abs(select_S - actual_S) > 255:
             R_match_S_penalty = -1
-        R_match_penalty = 0.5*R_match_B_penalty + 0.5*R_match_S_penalty
+        R_match_penalty =  R_match_S_penalty
 
         # ----------- 2.2 请求在slo内完成奖励,请求违反slo惩罚 ----------
         before_running_req = before_env_info.get("running_requests",[])

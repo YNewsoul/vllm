@@ -38,11 +38,11 @@ class RLSchedulerConfig:
     epsilon: float = 0.2               # 初始探索概率
     epsilon_max_step: int = 100000       # 最大探索步数
     epsilon_min: float = 0.1          # 最小探索概率
-    target_net_update_freq: int = 100  # 目标网络更新频率（单位：step）
+    target_net_update_freq: int = 200  # 目标网络更新频率（单位：step）
 
     # === MLPNetwork 参数
     state_dim: int = 4                 # 状态维度（根据环境定义）
-    action_dim: int = 28               # 动作维度（根据环境定义）
+    action_dim: int = 4               # 动作维度（根据环境定义）
 
     # === env 参数 ===
     llm_model_len: int = 10000              # LLM模型长度
@@ -59,7 +59,7 @@ class RLSchedulerConfig:
     lambda_R_comform_violate: float = 0.5        # 符合SLO请求奖励权重
 
     # === DualAttentionNetwork 参数 ===
-    Global_state_dim: int = 18          # G: 全局状态维度
+    Global_state_dim: int = 17          # G: 全局状态维度
     K_waiting: int = 10                # 取top-K个等待请求提取特征
     Feature_waiting: int = 3           # 等待队列特征维度
     K_running: int = 10                # 取top-K个运行请求提取特征
@@ -102,11 +102,11 @@ class RLSchedulerConfig:
             epsilon=float(os.getenv('VLLM_RL_EPSILON', '0.2')),
             epsilon_max_step=int(os.getenv('VLLM_RL_EPSILON_MAX_STEP', '100000')),
             epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.1')),
-            target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '100')),
+            target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '200')),
 
             # MLPNetwork 参数
             state_dim=int(os.getenv('VLLM_RL_STATE_DIM', '4')),
-            action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '28')),
+            action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '4')),
 
             # env 参数
             llm_model_len=int(os.getenv('VLLM_RL_LLM_MODEL_LEN', '10000')),
@@ -123,7 +123,7 @@ class RLSchedulerConfig:
             lambda_R_comform_violate=float(os.getenv('VLLM_RL_LAMBDA_R_COMPFORM_VIOLATE', '0.5')),
 
             # DualAttentionNetwork 参数
-            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '18')),
+            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '17')),
             K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '10')),
             Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '3')),
             K_running=int(os.getenv('VLLM_RL_K_RUNNING', '10')),
