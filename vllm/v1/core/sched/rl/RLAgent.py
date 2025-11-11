@@ -45,7 +45,6 @@ class RLAgent:
 
         self.action_map = [256,512,1024,2048]
 
-        self.is_ready = True
         self.last_save_model_time = 0
         self.log_frequency = self.config.log_frequency
         self.model_save_dir = None
@@ -97,8 +96,6 @@ class RLAgent:
         self.epsilon_min = self.config.epsilon_min                        # 最小探索概率（保留少量试错）
         self.target_net_update_freq = self.config.target_net_update_freq  # 目标网络更新频率
         
-        # 标记为已有模型（已加载预训练或初始化）
-        self.is_ready = True
         self._update_count = 1  
 
     def _initialize_log_file(self):

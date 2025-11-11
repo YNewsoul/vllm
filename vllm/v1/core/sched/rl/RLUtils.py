@@ -26,10 +26,10 @@ class RLDataCollection:
         self.latency_buffer = deque(maxlen=self.config.latency_buffer_size)
         self.total_latency = 0.0
 
-        # B/S 相关
-        self.B_S = {'select_S': 0.0,
-                    'actual_S': 0.0,
-                    'last_S': 0.0}
+        # token_budget 相关
+        self.T_B = {'select_token_budget': 0.0,
+                    'actual_token_budget': 0.0,
+                    'last_token_budget': 0.0}
         
         self.decode_count = 0
         self.prefill_count = 0
@@ -71,13 +71,13 @@ class RLDataCollection:
     def get_avg_latency(self):
         return self.total_latency / len(self.latency_buffer)
     
-    def update_BS(self,obs_data:Dict):
-        self.B_S['last_S'] = self.B_S['select_S']
-        self.B_S['select_S'] = obs_data['token_budget']
-        self.B_S['actual_S'] = obs_data['actual_S']
+    def update_T_B(self,obs_data:Dict):
+        self.T_B['last_token_budget'] = self.T_B['select_token_budget']
+        self.T_B['select_token_budget'] = obs_data['token_budget']
+        self.T_B['actual_token_budget'] = obs_data['actual_token_budget']
         
-    def get_BS(self):
-        return self.B_S
+    def get_T_B(self):
+        return self.T_B
     
     def set_decode_count(self,decode_count:int):
         self.decode_count = decode_count

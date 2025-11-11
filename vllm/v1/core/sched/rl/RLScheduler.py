@@ -48,7 +48,6 @@ class RLScheduler:
         self.stats = {
             'total_schedule_calls': 0,
             'avg_optimization_time_ms': 0,
-            'successful_optimizations': 0,
             'total_performance_records': 0,
         }
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -61,53 +60,48 @@ class RLScheduler:
     
     def compute_schedule_decision(self,env_info:Dict):
         """计算 RL 调度决策 """
-        if not self.enabled:
-            return None
-        # 更新统计信息
-        self.stats['total_schedule_calls'] += 1
         
-        if self.rl_agent.is_ready:
+        # Phase 1:从 RLAgent中选择 token_budget
+        time1 = time.monotonic()
+        token_budget = self._RL_schedule_judge(env_info)
+        use_rl_scheduler = False
+        if token_budget is None:
+            if self.rl_agent.train_enabled:
+                self.env.set_before_env_info(env_info)
+            token_budget = self.rl_agent.select(env_info)
+            use_rl_scheduler = True
+            self.stats['total_schedule_calls'] += 1
+        time2 = time.monotonic()
+        time_rl_agent_select = (time2 - time1)*1000
 
-            # Phase 1:从 RLAgent中选择 token_budget
-            time2 = time.monotonic()
-            token_budget = self._RL_schedule_judge(env_info)
-            use_rl_scheduler = False
-            if token_budget is None:
-                if self.rl_agent.train_enabled:
-                    self.env.set_before_env_info(env_info)
-                token_budget = self.rl_agent.select(env_info)
-                use_rl_scheduler = True
-            time3 = time.monotonic()
-            time_rl_agent_select = (time3 - time2)*1000
-            # Phase 2:使用 optimizer 计算具体分配
-            result = self.optimizer.optimize_schedule(
-                running_requests=env_info["running_requests"],
-                waiting_requests=env_info["waiting_requests"],
-                token_budget=token_budget
-            )
-            time4 = time.monotonic()
-            time_optimizer_optimize_schedule = (time4 - time3)*1000
+        # Phase 2:使用 optimizer 计算具体分配
+        result = self.optimizer.optimize_schedule(
+            running_requests=env_info["running_requests"],
+            waiting_requests=env_info["waiting_requests"],
+            token_budget=token_budget
+        )
+        time3 = time.monotonic()
+        time_optimizer_optimize_schedule = (time3 - time2)*1000
 
-            if time_optimizer_optimize_schedule >=5 or time_rl_agent_select>=2 :
-                self._write_timeout_info(time_optimizer_optimize_schedule,time_rl_agent_select)
+        if time_optimizer_optimize_schedule >=5 or time_rl_agent_select>=2 :
+            self._write_timeout_info(time_optimizer_optimize_schedule,time_rl_agent_select)
+        
+        if result:
             
-            if result:
-                self.stats['successful_optimizations'] += 1
-                
-                # 更新优化时间统计
-                # self._update_optimization_time_stats(result.optimization_time_ms)
-                
-                return {
-                    'allocation': result.allocation,
-                    'token_budget': result.select_S,
-                    'prioritize_decode': result.decode_count > 0,
-                    'actual_S': result.actual_S,
-                    'decode_count': result.decode_count,
-                    'prefill_count': result.prefill_count,
-                    'use_rl_scheduler': use_rl_scheduler,
-                }
-            else:
-                logger.info(f"RL Scheduler optimize schedule failed")
+            # 更新优化时间统计
+            # self._update_optimization_time_stats(result.optimization_time_ms)
+            
+            return {
+                'allocation': result.allocation,
+                'token_budget': result.select_token_budget,
+                'prioritize_decode': result.decode_count > 0,
+                'actual_token_budget': result.actual_token_budget,
+                'decode_count': result.decode_count,
+                'prefill_count': result.prefill_count,
+                'use_rl_scheduler': use_rl_scheduler,
+            }
+        else:
+            logger.info(f"RL Scheduler optimize schedule failed")
     
     def get_simple_status(self) -> Dict[str, Any]:
         """获取简化的状态信息，用于快速监控"""
