@@ -27,13 +27,10 @@ class RLDataCollection:
         self.total_latency = 0.0
 
         # token_budget 相关
-        self.T_B = {'select_token_budget': 0.0,
-                    'actual_token_budget': 0.0,
-                    'last_token_budget': 0.0}
+        self.select_token_budget = 0.0
+        self.actual_token_budget = 0.0
+        self.last_token_budget = 0.0
         
-        self.decode_count = 0
-        self.prefill_count = 0
-    
     def add_rl_finished_req(self,comform_slo:bool):
         if comform_slo:
             self.comform_slo_count += 1
@@ -71,22 +68,12 @@ class RLDataCollection:
     def get_avg_latency(self):
         return self.total_latency / len(self.latency_buffer)
     
-    def update_T_B(self,obs_data:Dict):
-        self.T_B['last_token_budget'] = self.T_B['select_token_budget']
-        self.T_B['select_token_budget'] = obs_data['token_budget']
-        self.T_B['actual_token_budget'] = obs_data['actual_token_budget']
+    def set_select_token_budget(self,select_token_budget:float):
+        self.last_token_budget = self.select_token_budget
+        self.select_token_budget = select_token_budget
+
+    def get_select_token_budget(self):
+        return self.select_token_budget
         
-    def get_T_B(self):
-        return self.T_B
-    
-    def set_decode_count(self,decode_count:int):
-        self.decode_count = decode_count
-
-    def set_prefill_count(self,prefill_count:int):
-        self.prefill_count = prefill_count
-
-    def get_decode_count(self):
-        return self.decode_count
-    
-    def get_prefill_count(self):
-        return self.prefill_count
+    def get_last_token_budget(self):
+        return self.last_token_budget

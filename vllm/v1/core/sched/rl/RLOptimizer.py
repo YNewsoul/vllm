@@ -27,8 +27,6 @@ class RLOptimizationResult:
     allocation: Dict[str, int]   # request_id -> tokens的分配映射
     optimization_time_ms: float  # 调度执行时间
     actual_token_budget: int     # 实际分配的token预算
-    decode_count: int            # decode请求数量
-    prefill_count: int           # prefill请求数量
 
 
 class RLOptimizer:
@@ -55,16 +53,14 @@ class RLOptimizer:
 
         result = None
         if actual_token_budget <= token_budget:
-            decode_count, prefill_count = self._count_request_types(
-                            running_requests, waiting_requests, allocation
-                        )
+            # decode_count, prefill_count = self._count_request_types(
+            #                 running_requests, waiting_requests, allocation
+            #             )
             result = RLOptimizationResult(
                             select_token_budget=token_budget,
                             allocation=allocation,
                             optimization_time_ms=0,  # 稍后设置
                             actual_token_budget=actual_token_budget,
-                            decode_count=decode_count,
-                            prefill_count=prefill_count
                         )
         if result:
             return result

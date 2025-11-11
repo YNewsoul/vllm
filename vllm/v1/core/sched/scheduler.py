@@ -43,20 +43,13 @@ logger = init_logger(__name__)
 
 # RL/SLA感知调度器导入
 try:
-    from .sla_aware import SLAScheduler
     from .rl import RLScheduler
     from .rl import RLDataCollection
-    SLA_SCHEDULER_AVAILABLE = True
     RL_SCHEDULER_AVAILABLE = True
-
 except ImportError as e:
-    logger.warning(f"SLA Scheduler not available: {e}")
     logger.warning(f"RL Scheduler not available: {e}")
-    SLAScheduler = None
     RLScheduler = None
-    SLASchedulerConfig = None
-    RLSchedulerConfig = None
-    SLA_SCHEDULER_AVAILABLE = False
+    RLDataCollection = None
     RL_SCHEDULER_AVAILABLE = False
 
 # ELRAR Engine Agent导入
@@ -117,7 +110,6 @@ class Scheduler(SchedulerInterface):
                 "with KV connectors")
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
-            logger.info("The KV connector has been initialized successfully!")
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -193,7 +185,7 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
 
-        # 初始化 RL/SLA 相关
+        # 初始化 RL 相关
         self._initialize()
         
     def _initialize(self):
@@ -214,17 +206,6 @@ class Scheduler(SchedulerInterface):
         self.current_batch_profiling_data: Optional[dict] = None # 当前batch的profiling数据，用于log和SLA调度
         self.current_batch_rl_data: Optional[dict] = None # 当前batch的用于提供给rl scheduler的数据
 
-        # # 负载感知调度：开关与参数
-        # self.enable_load_aware_sched = os.getenv('VLLM_ENABLE_LOAD_AWARE_SCHED', 'false').lower() == 'true'
-
-        # # 线性模型相关参数: model_run_ms = la_intercept_ms + la_alpha_ms_per_token * tokens
-        # self.la_alpha_ms_per_token = float(os.getenv('VLLM_LA_ALPHA_MS_PER_TOKEN', '0.0215'))
-        # self.la_intercept_ms = float(os.getenv('VLLM_LA_INTERCEPT_MS', '8.7'))
-        # self.slo_ttft_ms = float(os.getenv('VLLM_SLO_TTFT_MS', '500'))
-        # self.slo_tpot_ms = float(os.getenv('VLLM_SLO_TPOT_MS', '50'))
-        # self.la_t_min_ms = float(os.getenv('VLLM_LA_T_MIN_MS', '15'))
-        # self.la_q_high = int(os.getenv('VLLM_LA_Q_HIGH', '5'))
-
         # RL 环境相关信息
         self.rl_env_info = {'running_requests': None,
                 'waiting_requests': None,
@@ -237,21 +218,11 @@ class Scheduler(SchedulerInterface):
                 'select_token_budget':0.0,
                 'actual_token_budget':0.0}
 
-        # # 初始化SLA感知调度器
-        # self.sla_scheduler = None
-        # if SLA_SCHEDULER_AVAILABLE:
-        #     try:
-        #         self.sla_scheduler = SLAScheduler()
-        #         logger.info(f"SLA Scheduler initialized: {self.sla_scheduler.get_simple_status()}")
-        #     except Exception as e:
-        #         logger.warning(f"SLA Scheduler initialization failed: {e}")
-        #         self.sla_scheduler = None
-
         # 初始化 RL 调度
         self.rl_scheduler = None
         if RL_SCHEDULER_AVAILABLE:
             try:
-                self.rl_scheduler = RLScheduler(self.kv_cache_manager)
+                self.rl_scheduler = RLScheduler()
                 self.rl_data_collection = RLDataCollection()
                 logger.info(f"RL Scheduler initialized: {self.rl_scheduler.get_simple_status()}")
             except Exception as e:
@@ -307,58 +278,18 @@ class Scheduler(SchedulerInterface):
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {} # 记录每个请求已调度的token数
         
-        # # 计算token预算和目标延迟：使用SLA调度器
-        # if self.sla_scheduler and self.sla_scheduler.enabled:
-        #     # 获取完整的SLA调度决策
-        #     sla_schedule_decision = self.sla_scheduler.compute_schedule_decision(
-        #         running_requests=self.running,
-        #         waiting_requests=list(self.waiting),
-        #         max_tokens=self.max_num_scheduled_tokens,
-        #         max_batch_size=self.max_num_running_reqs
-        #     )
-            
-        #     if sla_schedule_decision:
-        #         # 从SLA决策中提取token预算和目标延迟
-        #         token_budget = sla_schedule_decision['token_budget']
-        #         T_set = sla_schedule_decision['target_latency']
-        #         prioritize_decode = sla_schedule_decision['prioritize_decode']
-        #     else:
-        #         # SLA调度器不可用，使用后备方案
-        #         if self.enable_load_aware_sched:
-        #             token_budget, T_set = self._compute_load_aware_budget_v2()
-        #         else:
-        #             token_budget = self.max_num_scheduled_tokens
-        #             T_set = self.slo_tpot_ms
-        #         prioritize_decode = False
-        # else:
-        #     sla_schedule_decision = None
-        #     token_budget = self.max_num_scheduled_tokens
-        #     prioritize_decode = False
-        
         # 使用 RL 调度器
         if self.rl_scheduler and self.rl_scheduler.enabled:
-            # 获取完整的RL调度决策
-            # 先获取当前环境
+            # 更新环境
             self.update_rl_env_info()
-            # 获取调度结果
             rl_schedule_decision = self.rl_scheduler.compute_schedule_decision(self.rl_env_info)
-            if rl_schedule_decision:
-                # 从RL决策中提取token预算和是否优先decode阶段
-                token_budget = rl_schedule_decision['token_budget']
-                prioritize_decode = rl_schedule_decision['prioritize_decode']
-                self.use_rl_scheduler = rl_schedule_decision['use_rl_scheduler']
-                self.rl_data_collection.update_BS(rl_schedule_decision)
-                self.rl_data_collection.set_decode_count(rl_schedule_decision['decode_count'])
-                self.rl_data_collection.set_prefill_count(rl_schedule_decision['prefill_count'])
-            else:
-                # 无法从RL调度器获取决策
-                token_budget = self.max_num_scheduled_tokens
-                prioritize_decode = False
+            token_budget = rl_schedule_decision['token_budget']
+            self.use_rl_scheduler = rl_schedule_decision['use_rl_scheduler']
+            self.rl_data_collection.set_select_token_budget(token_budget)
         else:
             # RL调度器不可用
             rl_schedule_decision = None
             token_budget = self.max_num_scheduled_tokens
-            prioritize_decode = False
         
         # 统一夹紧到全局上限，确保不超过系统限制
         token_budget = min(token_budget, self.max_num_scheduled_tokens)
@@ -373,37 +304,11 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         # 1.调度 running 状态的请求
-
-        # # 统计本步需要优先服务的 decode 数量（每个 decode 本步只需 1 个token）
-        # if self.sla_scheduler.enabled and (self.enable_load_aware_sched or prioritize_decode):
-        #     remaining_decode = sum(1 for _req in self.running
-        #                            if _req.num_computed_tokens >= _req.num_prompt_tokens)
-        # else:
-        #     remaining_decode = 0
-
         req_index = 0
         # 遍历RUNNING队列，分配token预算
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            # # 检查SLA调度器是否为此请求提供了具体分配
-            # sla_allocated_tokens = None
-            # if sla_schedule_decision and 'allocation' in sla_schedule_decision:
-            #     sla_allocated_tokens = sla_schedule_decision['allocation'].get(request.request_id, None)
-
-            # 检查 RL 调度器是否为此请求提供了具体分配
-            rl_allocated_tokens = None
-            if rl_schedule_decision and 'allocation' in rl_schedule_decision:
-                rl_allocated_tokens = rl_schedule_decision['allocation'].get(request.request_id, None)
-
-            # # 若启用负载感知或SLA调度器建议优先decode，且当前是 running prefill，且还有 decode 未满足，则将该请求移到队尾，优先服务 decode
-            # if self.sla_scheduler.enabled and (self.enable_load_aware_sched or prioritize_decode) and (request.num_computed_tokens < request.num_prompt_tokens) \
-            #         and remaining_decode > 0:
-            #     self.running.append(self.running.pop(req_index))
-            #     # 不增加 req_index，继续检查当前索引位置的新元素
-            #     logger.info(f"move request {request.request_id} to the end of running queue, remaining_decode:{remaining_decode}")
-            #     continue
-            
             # 计算该请求需要的新token数量
             num_new_tokens = (request.num_tokens_with_spec -request.num_computed_tokens)
 
@@ -411,33 +316,7 @@ class Scheduler(SchedulerInterface):
             if (0 < self.scheduler_config.long_prefill_token_threshold <num_new_tokens):
                 num_new_tokens = (self.scheduler_config.long_prefill_token_threshold)
             
-            # # 如果SLA调度器提供了具体分配，优先使用
-            # if sla_allocated_tokens is not None:
-            #     if sla_allocated_tokens == 0:
-            #         # SLA调度器决定跳过此请求
-            #         req_index += 1
-            #         continue
-            #     num_new_tokens = min(num_new_tokens, sla_allocated_tokens, token_budget)
-
-            # RL 调度器分配
-            if rl_allocated_tokens is not None:
-                if rl_allocated_tokens == 0:
-                    # RL调度器决定跳过此请求
-                    req_index += 1
-                    continue
-                num_new_tokens = min(num_new_tokens, rl_allocated_tokens, token_budget)
-            # # 否则使用原有的负载感知调度逻辑
-            # elif self.enable_load_aware_sched or prioritize_decode:
-            #     is_decode_phase = (request.num_computed_tokens >= request.num_prompt_tokens)
-            #     if is_decode_phase:
-            #         # decode：每步理想只发 1
-            #         num_new_tokens = min(num_new_tokens, 1, token_budget)
-            #     else:
-            #         # running prefill：吃掉剩余预算但不超过已有估算
-            #         num_new_tokens = min(num_new_tokens, token_budget)
-            else:
-                num_new_tokens = min(num_new_tokens, token_budget)
-
+            num_new_tokens = min(num_new_tokens, token_budget)
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
             # 确保输入位置不超过最大模型长度（投机解码时必要）
@@ -465,20 +344,8 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
-                logger.info(f"The running request '{request.request_id}' cannot be scheduled.")
                 req_index += 1
                 continue
-
-            # # 负载感知调度：对 RUNNING 中的 prefill 限制，保留 decode 预算
-            # if self.sla_scheduler.enabled and (self.enable_load_aware_sched or prioritize_decode):
-            #     is_decode_phase = (request.num_computed_tokens >= request.num_prompt_tokens)
-            #     if not is_decode_phase:
-            #         # running prefill：不侵占剩余预算
-            #         logger.info(f"running prefill,num_new_tokens:{num_new_tokens},token_budget:{token_budget},remaining_decode:{remaining_decode}")
-            #         num_new_tokens = min(num_new_tokens, token_budget)
-            #         if num_new_tokens == 0:
-            #             req_index += 1
-            #             continue
 
             num_draft_tokens = max(
                 num_new_tokens + request.num_computed_tokens -
@@ -533,11 +400,6 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
 
-            # # 若为 decode 且成功发放 token，则标记已满足一个 decode
-            # if self.sla_scheduler.enabled and (self.enable_load_aware_sched or prioritize_decode) and (request.num_computed_tokens >= request.num_prompt_tokens) \
-            #         and num_new_tokens > 0 and remaining_decode > 0:
-            #     remaining_decode -= 1
-
             req_index += 1
 
             # Speculative decode related.
@@ -581,24 +443,6 @@ class Scheduler(SchedulerInterface):
                     break
 
                 request = self.waiting[0]
-
-                # # 检查SLA调度器是否为该waiting请求分配tokens
-                # if sla_schedule_decision and 'allocation' in sla_schedule_decision:
-                #     sla_allocated_tokens = sla_schedule_decision['allocation'].get(request.request_id, None)
-                #     if sla_allocated_tokens is not None and sla_allocated_tokens == 0:
-                #         # SLA调度器决定不调度此请求，跳过它
-                #         self.waiting.popleft()
-                #         skipped_waiting_requests.appendleft(request)
-                #         continue
-
-                # 检查RL调度器是否为该请求分配tokens
-                if rl_schedule_decision and 'allocation' in rl_schedule_decision:
-                    rl_allocated_tokens = rl_schedule_decision['allocation'].get(request.request_id, None)
-                    if rl_allocated_tokens is not None and rl_allocated_tokens == 0:
-                        # RL调度器决定不调度此请求，跳过它
-                        self.waiting.popleft()
-                        skipped_waiting_requests.appendleft(request)
-                        continue
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -653,7 +497,6 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
-                        logger.info(f"Get externally-cached tokens :{num_external_computed_tokens}")
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_local_computed_tokens +
@@ -662,7 +505,6 @@ class Scheduler(SchedulerInterface):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
-                    # logger.info(f"the waiting req:{request.request_id},num_computed_tokens:{request.num_computed_tokens}")
                     # 处理之前已经启动异步KV传输但现在完成的请求
                     new_computed_blocks = (
                         self.kv_cache_manager.create_empty_block_list())
@@ -689,29 +531,8 @@ class Scheduler(SchedulerInterface):
                             < num_new_tokens):
                         num_new_tokens = (
                             self.scheduler_config.long_prefill_token_threshold)
-                    
-                    # # 检查SLA调度器是否为此waiting请求提供了具体分配
-                    # sla_allocated_tokens = None
-                    # if sla_schedule_decision and 'allocation' in sla_schedule_decision:
-                    #     sla_allocated_tokens = sla_schedule_decision['allocation'].get(request.request_id, None)
-                    
-                    # # 如果SLA调度器提供了具体分配，优先使用
-                    # if sla_allocated_tokens is not None:
-                    #     num_new_tokens = min(num_new_tokens, sla_allocated_tokens, token_budget)
-                    # else:
-                    #     num_new_tokens = min(num_new_tokens, token_budget)
 
-                    # 检查RL调度器是否为此请求提供了具体分配
-                    rl_allocated_tokens = None
-                    if rl_schedule_decision and 'allocation' in rl_schedule_decision:
-                        rl_allocated_tokens = rl_schedule_decision['allocation'].get(request.request_id, None)
-                    
-                    # 如果RL调度器提供了具体分配，优先使用
-                    if rl_allocated_tokens is not None:
-                        num_new_tokens = min(num_new_tokens, rl_allocated_tokens, token_budget)
-                    else:
-                        num_new_tokens = min(num_new_tokens, token_budget)
-                    
+                    num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -904,8 +725,6 @@ class Scheduler(SchedulerInterface):
         #             )
         #     except Exception as e:
         #         logger.warning(f"ELRAR state collection dispatch failed: {e}")
-
-
 
 
         # Advance the number of computed tokens for the request AFTER
@@ -1108,10 +927,6 @@ class Scheduler(SchedulerInterface):
         if self.last_schedule_end_time is not None:
             model_run_duration = time.monotonic() - self.last_schedule_end_time
             
-            # # SLA调度器性能记录（独立于profiling）
-            # if self.sla_scheduler.enabled and not self.sla_scheduler.config.use_pretrained_model:
-            #     self._record_sla_scheduler_performance(model_run_duration)
-            
             # Profiling数据记录（仅在启用时）
             if self.enable_profiling:
                 self._finalize_and_log_profiling(model_run_duration)
@@ -1290,7 +1105,7 @@ class Scheduler(SchedulerInterface):
 
         # 记录RL调度器性能
         if self.rl_scheduler and self.rl_scheduler.enabled :
-                self._record_rl_scheduler_performance(model_run_duration)
+            self._record_rl_scheduler_performance(model_run_duration)
             
         return engine_core_outputs
 
@@ -1521,13 +1336,14 @@ class Scheduler(SchedulerInterface):
                 num_computed_tokens.append(req.num_computed_tokens)
                 num_cached_tokens.append(req.num_cached_tokens)
                 req_slo.append(req.slo)
-                remaining_time.append(req.slo - (now_time - req.arrival_time))
+                remaining_time.append(f"{(req.slo - (now_time - req.arrival_time)):.3f}")
         now_time = time.time()
         # 准备统计信息（不包含model run时间）
         self.current_batch_profiling_data = {
             "batch_id": self.batch_counter,
             "timestamp": f"{now_time:.3f}",
             "select_token_budget": select_token_budget,
+            "rl_scheduler":self.use_rl_scheduler,
             "scheduled_tokens": total_num_scheduled_tokens,
             "chunk_sizes": chunk_sizes,
             "computed_tokens": num_computed_tokens,
@@ -1558,31 +1374,6 @@ class Scheduler(SchedulerInterface):
         self.current_batch_profiling_data = None # 重置
         self.last_schedule_end_time = None
 
-    def _record_sla_scheduler_performance(self, model_run_duration: float) -> None:
-
-        """记录SLA调度器性能数据"""
-        if not self.sla_scheduler or not self.current_batch_profiling_data:
-            return
-        
-        try:
-            # 从profiling数据中提取性能指标
-            batch_size = len([s for s in self.current_batch_profiling_data.get('chunk_sizes', []) if s > 0])
-            total_tokens = self.current_batch_profiling_data.get('scheduled_tokens', 0)
-            actual_latency = model_run_duration * 1000  # 转换为ms
-            
-            # 验证数据有效性
-            if batch_size > 0 and total_tokens > 0 and actual_latency > 0 :
-                # 记录到SLA调度器
-                self.sla_scheduler.record_performance(batch_size, total_tokens, actual_latency)
-            else:
-                if self.sla_scheduler.config.verbose_logging:
-                    logger.debug(f"SLA scheduler: skipping performance record due to invalid data: "
-                               f"batch_size={batch_size}, total_tokens={total_tokens}, "
-                               f"actual_latency={actual_latency:.2f}ms")
-                
-        except Exception as e:
-            logger.warning(f"Failed to record SLA scheduler performance: {e}")
-
     def _record_rl_scheduler_performance(self,model_run_duration: float) -> None:
         if not self.current_batch_rl_data:
             return
@@ -1594,9 +1385,9 @@ class Scheduler(SchedulerInterface):
             self.rl_data_collection.add_throughput(actual_total_tokens,actual_latency)
             self.rl_data_collection.add_latency(actual_latency)
 
-            self.update_rl_env_info(True)
             if self.use_rl_scheduler:
                 # 当使用rl 调度时才更新rl环境信息
+                self.update_rl_env_info(True)
                 self.rl_scheduler.record_performance(self.rl_env_info)
         except Exception as e:
             logger.warning(f"Failed to record RL scheduler performance: {e}")
@@ -1688,7 +1479,6 @@ class Scheduler(SchedulerInterface):
             self.rl_env_info['recent_avg_latency'] = self.rl_data_collection.get_avg_latency()
             self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
             self.rl_env_info['current_throughput'] = self.rl_data_collection.get_current_throughput()
-            self.rl_env_info['decode_count'] = self.rl_data_collection.get_decode_count()
-            self.rl_env_info['prefill_count'] = self.rl_data_collection.get_prefill_count()
-            T_B = self.rl_data_collection.get_T_B()
-            self.rl_env_info.update(T_B)
+            self.rl_env_info['select_token_budget'] = self.rl_data_collection.get_select_token_budget()
+            self.rl_env_info['last_token_budget'] = self.rl_data_collection.get_last_token_budget()
+            self.rl_env_info['actual_token_budget'] = self.current_batch_rl_data.get('total_num_scheduled_tokens', 0)

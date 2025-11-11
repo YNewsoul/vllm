@@ -90,9 +90,12 @@ class Request:
         # 添加额外的属性
         self._set_other_attribute()
 
+
+
     def _set_other_attribute(self):
         # 设置到达时间
         self.arrival_time = time.monotonic()
+        logger.info(f"arrival_time:{self.sampling_params}")
 
         # 设置slo
         slo_dict = {2000:5,

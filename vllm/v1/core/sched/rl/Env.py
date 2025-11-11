@@ -34,11 +34,9 @@ class Env:
             'recent_avg_latency': env_info.get('recent_avg_latency', 0.0),
             'recent_comform_slo_rate': env_info.get('recent_comform_slo_rate', 0.0),
             'current_throughput': env_info.get('current_throughput', 0.0),
-            'decode_count': env_info.get('decode_count', 0),
-            'prefill_count': env_info.get('prefill_count', 0),
-            'last_S': env_info.get('last_S', 0.0),
-            'select_S': env_info.get('select_S', 0.0),
-            'actual_S': env_info.get('actual_S', 0.0),
+            'last_token_budget': env_info.get('last_token_budget', 0.0),
+            'select_token_budget': env_info.get('select_token_budget', 0.0),
+            'actual_token_budget': env_info.get('actual_token_budget', 0.0),
             # 仅创建请求的轻量级快照
             'running_requests': [
                 RequestSnapshot(
@@ -66,7 +64,6 @@ class Env:
         time_1 = time.monotonic()
         self.before_env_info = self._create_env_snapshot(before_env_info)
         time_2 = time.monotonic()
-        # logger.info(f"Env set_before_env_info time: {(time_2 - time_1)*1000:.3f} ms")
         
     def set_after_env_info(self,after_env_info:Dict):
         self.after_env_info = None
@@ -74,14 +71,6 @@ class Env:
 
     def get_env_info(self):
         return self.before_env_info, self.after_env_info
-    
-    def reset(self) -> np.ndarray:
-        pass
-        # """重置环境（训练初始化）"""
-        # self.unfinished_reqs = []
-        # self.waiting_queue = []
-        # self.gpu_free_kv = 1.0
-        # self.last_bs = (6, 512)
-        # self.slo_history.clear()
-        # self._init_workload()
-        # return self._get_state()
+
+    def get_before_env_info(self):
+        return self.before_env_info 
