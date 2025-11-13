@@ -67,60 +67,59 @@ class Trainer:
         return random.sample(self.rl_replay_buffer, batch_size)
     
     def _caculate_reward(self, before_env_info,after_env_info):
-        """
-        综合奖励函数：
-        R = λ1*SLO成功率 + λ2*吞吐量 - λ3*延迟惩罚 - λ4*资源浪费
-        """
         reward = 0.0
 
-        # rl_env_info = {'running_requests': None,
-        # 'waiting_requests': None,
-        # 'now_time': None,
-        # 'recent_throughput': 0.0,
-        # 'recent_avg_latency': 0.0,
-        # 'recent_comform_slo_rate': 0.0,
-        # 'current_throughput': 0.0,
-        # 'last_S':0.0,
-        # 'select_S':0.0,
-        # 'actual_S':0.0}
-
-        # ========== 1 长期奖励 ==========
-        # ---------- 1.1 最近一段时间/n个请求的SLO 满足情况 ----------
-        recent_comform_slo_rate = after_env_info.get("recent_comform_slo_rate", 0.0)
-
-        # ---------- 1.2 最近一段时间/n个iteration 吞吐量奖励 ----------
-        recent_throughput = after_env_info.get("recent_throughput", 0.0)/ self.config.throughput_norm
-
-        # ========== 2 短期奖励 ==========
-        # ---------- 2.1 匹配 token_budget 惩罚 ----------
-        select_token_budget = after_env_info.get("select_token_budget", 0)
-        actual_token_budget = after_env_info.get("actual_token_budget", 0)
-        R_match_S_penalty = 0
-        if abs(select_token_budget - actual_token_budget) > 255:
-            R_match_S_penalty = -1
-        R_match_penalty =  R_match_S_penalty
-
-        # ----------- 2.2 请求在slo内完成奖励,请求违反slo惩罚 ----------
+        # 获取信息
         before_running_req = before_env_info.get("running_requests",[])
+        before_waiting_req = before_env_info.get("waiting_requests",[])
+        before_time = before_env_info.get("now_time")
+
         after_running_req = after_env_info.get("running_requests",[])
-        after_running_req_ids = [req.request_id for req in after_running_req]
-        now_time = after_env_info.get("now_time", 0.0)
-        comform_req_count = 0
-        violate_req_count = 0
-        R_comform_violate = 0
+        after_req_ids = [req.request_id for req in after_running_req]
+        after_time = after_env_info.get("now_time")
+        model_run_time = after_env_info.get("model_run_time",0.0)
+        select_token_budget = after_env_info.get("select_token_budget", 0)
+
+        # ========== 1 短期奖励 ==========
+        rew_decode = 0
+        rew_prefill = 0
+        rew_finish = 0
+        finish_count = 0
+        total_prompt_count = 0
         for req in before_running_req:
-            if req.request_id not in after_running_req_ids:
-                # 请求已完成
-                if now_time - req.arrival_time < req.slo:
-                    comform_req_count += 1
+            output_tokens = req.num_computed_tokens - req.num_prompt_tokens
+            if output_tokens>= 0:
+                # decode 阶段请求
+                if req.request_id not in after_req_ids:
+                    # 该请求在after_running_req中不存在，说明该请求在此轮完成
+                    if after_time - req.arrival_time <= req.slo:
+                        rew_finish += 1
+                    else:
+                        rew_finish -= 1
+                    finish_count += 1
+                elif ((req.max_tokens/2 - output_tokens)*model_run_time/1000) <= (req.slo-(before_time-req.arrival_time)):
+                    rew_decode += 1
                 else:
-                    violate_req_count += 1
-        R_comform_violate = comform_req_count*0.5 - violate_req_count*0.5
+                    rew_decode -= 1
+            else:
+                # prefill 请求
+                total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens
+        
+        for req in before_waiting_req:
+            total_prompt_count += req.num_prompt_tokens
+
+        rew_decode /= (len(before_running_req)-1)
+        rew_finish = rew_finish/finish_count if finish_count > 0 else 0
+        rew_prefill = float(f"{select_token_budget/2048:.3f}")*(total_prompt_count/20480)
+
+        # ========== 2 长期奖励 ==========
+        # ---------- 2.1 最近一段时间/n个请求的SLO 满足情况 ----------
+        recent_comform_slo_rate = after_env_info.get("recent_comform_slo_rate", 0.0)
 
         # ---------- 综合 ----------
         reward = (self.config.lambda_recent_comform_slo * recent_comform_slo_rate) + \
-                (self.config.lambda_recent_throughput * recent_throughput) + \
-                (self.config.lambda_R_match_penalty * R_match_penalty) + \
-                (self.config.lambda_R_comform_violate * R_comform_violate)
+                (self.config.lambda_decode * float(f"{rew_decode:.3f}")) + \
+                (self.config.lambda_prefill * rew_prefill) + \
+                (self.config.lambda_finish * rew_finish)
 
         return reward

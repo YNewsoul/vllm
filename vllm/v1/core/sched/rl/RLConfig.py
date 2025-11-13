@@ -19,7 +19,7 @@ class RLSchedulerConfig:
     enabled: bool = False              # 是否启用RL SLA调度器
     
     # === RLUtils 参数 ===
-    rl_finished_reqs_buffer_size: int = 100  # 已完成请求缓冲区大小
+    rl_finished_reqs_buffer_size: int = 10  # 已完成请求缓冲区大小
     throughput_buffer_size: int = 100  # 吞吐缓冲区大小
     latency_buffer_size: int = 100  # 延迟缓冲区大小
 
@@ -46,24 +46,22 @@ class RLSchedulerConfig:
 
     # === env 参数 ===
     llm_model_len: int = 10000              # LLM模型长度
-    B_norm: int = 16                  # 批次归一化因子
-    S_norm: int = 2048                  # 序列长度归一化因子
-    throughput_norm: float = 20000.0    # 吞吐量归一化因子
-    slo_norm: float = 30.0              # SLO 归一化因子
-    prompt_norm: float = 10000.0      # 提示归一化因子
+    token_budget_norm: int = 2048       # 序列长度归一化因子
+    prompt_norm: float = 30000.0      # 提示归一化因子
+    time_norm: float = 300.0           # 时间归一化因子
 
     # === reward 函数参数 ===
-    lambda_recent_comform_slo: float = 2         # 最近符合SLO请求奖励权重
-    lambda_recent_throughput: float = 1        # 最近吞吐量奖励权重
-    lambda_R_match_penalty: float = 0.5          # 匹配奖励权重
-    lambda_R_comform_violate: float = 0.5        # 符合SLO请求奖励权重
+    lambda_recent_comform_slo: float = 2.0         # 最近符合SLO请求奖励权重
+    lambda_decode: float = 1.0         # decode 奖励权重
+    lambda_prefill: float = 1.0        # prefill 奖励权重
+    lambda_finish: float = 2.0        # finish 奖励权重
 
     # === DualAttentionNetwork 参数 ===
-    Global_state_dim: int = 17          # G: 全局状态维度
-    K_waiting: int = 10                # 取top-K个等待请求提取特征
-    Feature_waiting: int = 3           # 等待队列特征维度
-    K_running: int = 10                # 取top-K个运行请求提取特征
-    Feature_running: int = 7           # 运行队列特征维度
+    Global_state_dim: int = 10          # G: 全局状态维度
+    K_waiting: int = 5                # 取top-K个等待请求提取特征
+    Feature_waiting: int = 2           # 等待队列特征维度
+    K_running: int = 20                # 取top-K个运行请求提取特征
+    Feature_running: int = 2           # 运行队列特征维度
         
     # === RLOptimizer 参数 ===
     optimization_timeout_ms: float = 10.0    # 优化器超时时间（ms）
@@ -83,7 +81,7 @@ class RLSchedulerConfig:
             enabled=os.getenv('VLLM_RL_SCHEDULER_ENABLED', 'false').lower() == 'true',
             
             # RLUtils 参数
-            rl_finished_reqs_buffer_size=int(os.getenv('VLLM_RL_FINISHED_REQS_BUFFER_SIZE', '100')),
+            rl_finished_reqs_buffer_size=int(os.getenv('VLLM_RL_FINISHED_REQS_BUFFER_SIZE', '10')),
             throughput_buffer_size=int(os.getenv('VLLM_RL_THROUGHPUT_BUFFER_SIZE', '100')),
             latency_buffer_size=int(os.getenv('VLLM_RL_LATENCY_BUFFER_SIZE', '100')),
 
@@ -110,24 +108,22 @@ class RLSchedulerConfig:
 
             # env 参数
             llm_model_len=int(os.getenv('VLLM_RL_LLM_MODEL_LEN', '10000')),
-            B_norm=int(os.getenv('VLLM_RL_B_NORM', '16')),
-            S_norm=int(os.getenv('VLLM_RL_S_NORM', '2048')),
-            throughput_norm=float(os.getenv('VLLM_RL_THROUGHPUT_NORM', '20000.0')),
-            slo_norm=float(os.getenv('VLLM_RL_SLO_NORM', '30.0')),
-            prompt_norm=float(os.getenv('VLLM_RL_PROMPT_NORM', '10000.0')),
+            token_budget_norm=int(os.getenv('VLLM_RL_TOKEN_BUDGET_NORM', '2048')),
+            prompt_norm=float(os.getenv('VLLM_RL_PROMPT_NORM', '30000.0')),
+            time_norm=float(os.getenv('VLLM_RL_TIME_NORM', '300.0')),
 
             # reward 参数
-            lambda_recent_comform_slo=float(os.getenv('VLLM_RL_LAMBDA_RECENT_CONFORM_SLO', '2')),
-            lambda_recent_throughput=float(os.getenv('VLLM_RL_LAMBDA_RECENT_THROUGHPUT', '1')),
-            lambda_R_match_penalty=float(os.getenv('VLLM_RL_LAMBDA_R_MATCH_PENALTY', '0.5')),
-            lambda_R_comform_violate=float(os.getenv('VLLM_RL_LAMBDA_R_COMPFORM_VIOLATE', '0.5')),
+            lambda_recent_comform_slo=float(os.getenv('VLLM_RL_LAMBDA_RECENT_CONFORM_SLO', '2.0')),
+            lambda_decode=float(os.getenv('VLLM_RL_LAMBDA_DECODE', '1.0')),
+            lambda_prefill=float(os.getenv('VLLM_RL_LAMBDA_PREFILL', '1.0')),
+            lambda_finish=float(os.getenv('VLLM_RL_LAMBDA_FINISH', '2.0')),
 
             # DualAttentionNetwork 参数
-            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '17')),
-            K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '10')),
-            Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '3')),
-            K_running=int(os.getenv('VLLM_RL_K_RUNNING', '10')),
-            Feature_running=int(os.getenv('VLLM_RL_FEATURE_RUNNING', '7')),
+            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '10')),
+            K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '5')),
+            Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '2')),
+            K_running=int(os.getenv('VLLM_RL_K_RUNNING', '20')),
+            Feature_running=int(os.getenv('VLLM_RL_FEATURE_RUNNING', '2')),
 
             # RLOptimizer 参数
             optimization_timeout_ms=float(os.getenv('VLLM_RL_OPTIMIZATION_TIMEOUT_MS', '10.0')),

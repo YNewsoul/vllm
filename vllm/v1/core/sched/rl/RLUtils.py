@@ -54,7 +54,7 @@ class RLDataCollection:
         self.throughput_buffer.append((actual_token,model_time))
 
     def get_throughput(self):
-        return self.total_token / self.total_model_time
+        return self.total_token / self.total_model_time if self.total_model_time > 0 else 0.0
         
     def get_current_throughput(self):
         return self.current_throughput

@@ -12,7 +12,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
 
 class RequestSnapshot(namedtuple('RequestSnapshot', ['request_id', 'num_computed_tokens', 
-                                'num_prompt_tokens', 'arrival_time', 'slo'])):
+                                'num_prompt_tokens', 'arrival_time', 'slo','max_tokens'])):
     """请求的轻量级快照，只包含RL决策所需的关键信息"""
     __slots__ = ()
 
@@ -37,6 +37,8 @@ class Env:
             'last_token_budget': env_info.get('last_token_budget', 0.0),
             'select_token_budget': env_info.get('select_token_budget', 0.0),
             'actual_token_budget': env_info.get('actual_token_budget', 0.0),
+            'last_model_run_time': env_info.get('last_model_run_time', 0.0),
+            'model_run_time': env_info.get('model_run_time', 0.0),
             # 仅创建请求的轻量级快照
             'running_requests': [
                 RequestSnapshot(
@@ -44,7 +46,8 @@ class Env:
                     req.num_computed_tokens,
                     req.num_prompt_tokens,
                     req.arrival_time,
-                    req.slo
+                    req.slo,
+                    req.max_tokens
                 ) for req in env_info.get('running_requests', [])
             ],
             'waiting_requests': [
@@ -53,7 +56,8 @@ class Env:
                     req.num_computed_tokens,
                     req.num_prompt_tokens,
                     req.arrival_time,
-                    req.slo
+                    req.slo,
+                    req.max_tokens
                 ) for req in env_info.get('waiting_requests', [])
             ]
         }

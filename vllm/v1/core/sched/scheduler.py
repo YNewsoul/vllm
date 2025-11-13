@@ -216,7 +216,9 @@ class Scheduler(SchedulerInterface):
                 'current_throughput': 0.0,
                 'last_token_budget':0.0,
                 'select_token_budget':0.0,
-                'actual_token_budget':0.0}
+                'actual_token_budget':0.0,
+                'last_model_run_time':0.0,
+                'model_run_time':0.0}
 
         # 初始化 RL 调度
         self.rl_scheduler = None
@@ -1363,12 +1365,13 @@ class Scheduler(SchedulerInterface):
         # 添加model run时间
         self.current_batch_profiling_data["model_run_ms"] = f"{model_run_duration * 1000:.3f}"
         
-        # 写入日志文件
-        try:
-            with open(self.profiling_log_file, 'a', encoding='utf-8') as f:
-                f.write(json.dumps(self.current_batch_profiling_data, ensure_ascii=False) + '\n')
-        except Exception as e:
-            logger.warning(f"Failed to write profiling data: {e}")
+        if self.use_rl_scheduler:
+            # 写入日志文件
+            try:
+                with open(self.profiling_log_file, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(self.current_batch_profiling_data, ensure_ascii=False) + '\n')
+            except Exception as e:
+                logger.warning(f"Failed to write profiling data: {e}")
         
         self.batch_counter += 1
         self.current_batch_profiling_data = None # 重置
@@ -1377,20 +1380,17 @@ class Scheduler(SchedulerInterface):
     def _record_rl_scheduler_performance(self,model_run_duration: float) -> None:
         if not self.current_batch_rl_data:
             return
-        
-        try:
-            actual_total_tokens = self.current_batch_rl_data.get('total_num_scheduled_tokens', 0)
-            actual_latency = model_run_duration # s
+        self.current_batch_rl_data.update({"model_run_ms":float(f"{model_run_duration*1000:.3f}")})
+        actual_total_tokens = self.current_batch_rl_data.get('total_num_scheduled_tokens', 0)
+        actual_latency = model_run_duration # s
 
-            self.rl_data_collection.add_throughput(actual_total_tokens,actual_latency)
-            self.rl_data_collection.add_latency(actual_latency)
+        self.rl_data_collection.add_throughput(actual_total_tokens,actual_latency)
+        self.rl_data_collection.add_latency(actual_latency)
 
-            if self.use_rl_scheduler:
-                # 当使用rl 调度时才更新rl环境信息
-                self.update_rl_env_info(True)
-                self.rl_scheduler.record_performance(self.rl_env_info)
-        except Exception as e:
-            logger.warning(f"Failed to record RL scheduler performance: {e}")
+        if self.use_rl_scheduler:
+            # 当使用rl 调度时才更新rl环境信息
+            self.update_rl_env_info(True)
+            self.rl_scheduler.record_performance(self.rl_env_info)
             
     # ==============================
     # ELRAR Engine Agent helpers
@@ -1474,11 +1474,13 @@ class Scheduler(SchedulerInterface):
         self.rl_env_info['waiting_requests'] = list(self.waiting)
         self.rl_env_info['now_time'] = time.monotonic()
         self.rl_env_info['max_num_scheduled_tokens'] = self.max_num_scheduled_tokens
+        self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
+        self.rl_env_info['last_model_run_time'] = self.rl_env_info['model_run_time']
         if After:
             self.rl_env_info['recent_throughput'] = self.rl_data_collection.get_throughput()
             self.rl_env_info['recent_avg_latency'] = self.rl_data_collection.get_avg_latency()
-            self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
             self.rl_env_info['current_throughput'] = self.rl_data_collection.get_current_throughput()
             self.rl_env_info['select_token_budget'] = self.rl_data_collection.get_select_token_budget()
             self.rl_env_info['last_token_budget'] = self.rl_data_collection.get_last_token_budget()
             self.rl_env_info['actual_token_budget'] = self.current_batch_rl_data.get('total_num_scheduled_tokens', 0)
+            self.rl_env_info['model_run_time'] = self.current_batch_rl_data.get('model_run_ms',0)

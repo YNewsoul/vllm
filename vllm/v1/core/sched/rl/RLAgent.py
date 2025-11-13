@@ -266,114 +266,90 @@ class RLAgent:
         except Exception as e:
             logger.error(f"load model failed,from {model_path}, error: {e}")
             return False
-
-    def env_info_to_state(self, env_info:Dict):
-
-        # global queue data statistics
+    def env_info_to_state(self, env_info: Dict):
         now_time = env_info.get("now_time", 0.0)
-        running = env_info.get("running_requests", [])
-        waiting = env_info.get("waiting_requests", [])
-        num_runing = len(running)
+        running = list(env_info.get("running_requests", []))
+        waiting = list(env_info.get("waiting_requests", []))
+
+        num_running = len(running)
         num_waiting = len(waiting)
-        total_reqs = num_runing + num_waiting
-        running_ratio = num_runing / total_reqs if total_reqs > 0 else 0.0
-        waiting_ratio = num_waiting / total_reqs if total_reqs > 0 else 0.0
 
-        # running queue data statistics
-        if num_runing > 0:
-            r_need_computed = np.array([max(1,r.num_prompt_tokens - r.num_computed_tokens) for r in running], dtype=np.float32)
-            r_need_computed_avg = float(r_need_computed.mean()) / self.config.llm_model_len
-            r_need_computed_std = float(r_need_computed.std()) / self.config.llm_model_len
+        # ---- Decode & Prefill 分类 ----
+        decode_reqs = [r for r in running if self._is_decode_phase(r)]
+        prefill_reqs = [r for r in running if not self._is_decode_phase(r)]
+
+        num_decode = len(decode_reqs)
+        frac_decode = num_decode / num_running if num_running > 0 else 0.0
+
+        # ---- Decode 统计 ----
+        if num_decode > 0:
+            decode_remaining = [(r.slo - (now_time - r.arrival_time)) / r.slo for r in decode_reqs]
+            avg_decode_remaining_slo = float(np.mean(decode_remaining))
+            min_decode_remaining_slo = float(np.min(decode_remaining))
         else:
-            r_need_computed_avg = r_need_computed_std = 0.0
-        
-        # waiting queue data statistics
+            avg_decode_remaining_slo = min_decode_remaining_slo = 0.0
+
+        # ---- Prefill 特征 ----
+        if len(prefill_reqs) > 0:
+            r = prefill_reqs[0]
+            prefill_remaining_ratio = max(0.0, r.num_prompt_tokens - r.num_computed_tokens) / max(1.0, r.num_prompt_tokens)
+            prefill_remaining_slo_ratio = max(0.0, (r.slo - (now_time - r.arrival_time)) / r.slo)
+        else:
+            prefill_remaining_ratio = prefill_remaining_slo_ratio = 0.0
+
+        # ---- Waiting 特征 ----
         if num_waiting > 0:
-            w_need_computed = np.array([w.num_prompt_tokens for w in waiting], dtype=np.float32)
-            w_need_computed_avg = float(w_need_computed.mean()) / self.config.llm_model_len
-            w_need_computed_std = float(w_need_computed.std()) / self.config.llm_model_len
+            wait_remaining = [(r.slo - (now_time - r.arrival_time)) / r.slo for r in waiting]
+            wait_prompt_len = [r.num_prompt_tokens for r in waiting]
+            avg_wait_slo_ratio = float(np.mean(wait_remaining))
+            avg_wait_prompt_len = float(np.mean(wait_prompt_len)) / self.config.prompt_norm
         else:
-            w_need_computed_avg = w_need_computed_std = 0.0
+            avg_wait_slo_ratio = avg_wait_prompt_len = 0.0
 
-        # decode 比例
-        is_decodes = np.array([1.0 if self._is_decode_phase(r) else 0.0 for r in running], dtype=np.float32)
-        frac_decode = float(is_decodes.mean()) if len(is_decodes)>0 else 0.0
-
-        # remaining SLO ratios: for waiting and running
-
-        wait_remaining = []
-        for r in waiting:
-            elapsed = now_time - r.arrival_time
-            remaining =  (r.slo - elapsed)/r.slo
-            wait_remaining.append(remaining)
-        run_remaining = []
-        for r in running:
-            elapsed = now_time - r.arrival_time
-            remaining =  (r.slo - elapsed)/r.slo
-            run_remaining.append(remaining)
-
-        avg_wait_remaining = float(np.mean(wait_remaining)) if wait_remaining else 0.0
-        min_wait_remaining = float(np.min(wait_remaining)) if wait_remaining else 0.0
-        avg_run_remaining = float(np.mean(run_remaining)) if run_remaining else 0.0
-        min_run_remaining = float(np.min(run_remaining)) if run_remaining else 0.0
-
-        # recent aggregated metrics
-        recent_throughput = float(env_info.get("recent_throughput", 0.0)) / self.config.throughput_norm
-        recent_avg_latency = float(env_info.get("recent_avg_latency", 0.0)) / self.config.slo_norm
+        # ---- Global 指标 ----
         recent_comform_slo_rate = float(env_info.get("recent_comform_slo_rate", 0.0))
+        last_token_budget = float(env_info.get("last_token_budget", 0.0)) / self.config.token_budget_norm
+        last_model_run_time = float(env_info.get("last_model_run_time", 0.0)) / self.config.time_norm
 
-        last_S = float(env_info.get("last_S", 0.0))/self.config.S_norm
-        
+        # ---- 组装 ----
         global_vec = np.array([
-            num_runing,num_waiting,
-            running_ratio,waiting_ratio,
-            r_need_computed_avg,r_need_computed_std,
-            w_need_computed_avg,w_need_computed_std,
             frac_decode,
-            avg_wait_remaining,min_wait_remaining,
-            avg_run_remaining,min_run_remaining,
-            recent_throughput,recent_avg_latency,recent_comform_slo_rate,
-            last_S,
+            avg_decode_remaining_slo, min_decode_remaining_slo,
+            prefill_remaining_ratio, prefill_remaining_slo_ratio,
+            avg_wait_slo_ratio, avg_wait_prompt_len,
+            recent_comform_slo_rate,
+            last_token_budget, last_model_run_time
         ], dtype=np.float32)
 
+        # ---- 等待队列 top-K （轻量 attention 输入）----
         waiting_feats, wait_mask = [], []
         for r in waiting[:self.config.K_waiting]:
-            p_len = float(r.num_prompt_tokens) / self.config.prompt_norm
             elapsed = now_time - r.arrival_time
-            remaining =  (r.slo - elapsed)/r.slo
-            age = elapsed / r.slo
-            waiting_feats.append([p_len,remaining, age])
+            remaining = (r.slo - elapsed) / r.slo
+            p_len = float(r.num_prompt_tokens) / self.config.prompt_norm
+            waiting_feats.append([p_len, remaining])
             wait_mask.append(1.0)
-        
-        # pad waiting
         while len(waiting_feats) < self.config.K_waiting:
-            waiting_feats.append([0.0]*3)
+            waiting_feats.append([0.0]*2)
             wait_mask.append(0.0)
-        wait_arr = np.array(waiting_feats, dtype=np.float32)  # shape (K_wait, 3)
+
+        wait_arr = np.array(waiting_feats, dtype=np.float32)
         wait_mask = np.array(wait_mask, dtype=np.float32)
 
+        # ---- running attention 输入（decode+prefill）----
         running_feats, run_mask = [], []
         for r in running[:self.config.K_running]:
-            p_len = float(r.num_prompt_tokens) / self.config.prompt_norm
-            processed = float(r.num_computed_tokens) / self.config.prompt_norm
             is_dec = 1.0 if self._is_decode_phase(r) else 0.0
-            elapsed = now_time - r.arrival_time
-            remaining =  (r.slo - elapsed)/r.slo
-            age = elapsed / r.slo
-            # remaining_prefill_tokens: if available (how many prompt tokens left to prefill), normalize by S_max
-            remaining_prefill = max(0.0, r.num_prompt_tokens - r.num_computed_tokens) / self.config.prompt_norm
-            # pack: we normalize elapsed by slo as proxy (or by a fixed constant)
-            elapsed_norm = min(1.0, elapsed / max(1.0, r.slo))
-            running_feats.append([p_len, processed, is_dec, remaining, age, elapsed_norm, remaining_prefill])
+            remaining_slo = (r.slo - (now_time - r.arrival_time)) / r.slo
+            running_feats.append([is_dec, remaining_slo])
             run_mask.append(1.0)
-        
-        # pad running
         while len(running_feats) < self.config.K_running:
-            running_feats.append([0.0]*7)
+            running_feats.append([0.0]*2)
             run_mask.append(0.0)
-        run_arr = np.array(running_feats, dtype=np.float32)  # shape (K_run, 7)
+
+        run_arr = np.array(running_feats, dtype=np.float32)
         run_mask = np.array(run_mask, dtype=np.float32)
-        
+
         return global_vec, wait_arr, run_arr, wait_mask, run_mask
 
     def _is_decode_phase(self, request) -> bool:
@@ -419,9 +395,8 @@ class RLAgent:
                    "target_net_update_freq":self.config.target_net_update_freq,
             },
             "reward":{"lambda_recent_comform_slo":self.config.lambda_recent_comform_slo,
-                      "lambda_recent_throughput":self.config.lambda_recent_throughput,
-                      "lambda_R_match_penalty":self.config.lambda_R_match_penalty,
-                      "lambda_R_comform_violate":self.config.lambda_R_comform_violate,
+                      "lambda_decode":self.config.lambda_decode,
+                      "lambda_prefill":self.config.lambda_prefill,
             },
             "MLPNetwork":{"state_dim":self.config.state_dim,
                           "action_dim":self.config.action_dim,
