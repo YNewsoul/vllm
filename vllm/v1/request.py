@@ -87,6 +87,8 @@ class Request:
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
 
+        self.extra_data = self.sampling_params.extra_args.get('extra_data', None)
+        logger.info(f"extra_data:{self.extra_data}")
         # 添加额外的属性
         self._set_other_attribute()
 
@@ -95,9 +97,11 @@ class Request:
     def _set_other_attribute(self):
         # 设置到达时间
         self.arrival_time = time.monotonic()
-
+        logger.info(f"arrival_time:{self.arrival_time}")
         # 设置slo
-        slo_dict = {2000:26,
+        slo_dict = {500:18,
+                    1000:20,
+                    2000:26,
                     4000:29,
                     6000:31,
                     8000:33,
@@ -111,7 +115,7 @@ class Request:
                     24000:56,
                     26000:59,
                     28000:63}
-        sorted_keys = [2000, 4000,6000, 8000,10000,12000, 14000,16000, 18000,20000,22000,24000,26000,28000]
+        sorted_keys = [500,1000,2000, 4000,6000, 8000,10000,12000, 14000,16000, 18000,20000,22000,24000,26000,28000]
 
         index = bisect.bisect_left(sorted_keys, self.num_prompt_tokens)
         if index < len(sorted_keys):

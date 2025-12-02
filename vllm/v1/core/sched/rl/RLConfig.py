@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass,asdict
 import logging
 
 try:
@@ -29,7 +29,7 @@ class RLSchedulerConfig:
     rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
     use_pretrained_model: bool = False  # 是否使用预训练模型
     pretrained_model_path: str = ""     # 预训练模型路径
-    save_model_frequency: float = 180.0  # 保存模型频率（单位：秒）
+    save_model_frequency: float = 240.0  # 保存模型频率（单位：秒）
     log_frequency: int = 40           # 日志记录频率（单位：step）
 
     # === DQN 参数 ===
@@ -37,12 +37,12 @@ class RLSchedulerConfig:
     gamma: float = 0.9                 # 折扣因子（长期奖励权重）
     epsilon: float = 0.2               # 初始探索概率
     epsilon_max_step: int = 100000       # 最大探索步数
-    epsilon_min: float = 0.1          # 最小探索概率
+    epsilon_min: float = 0.05          # 最小探索概率
     target_net_update_freq: int = 200  # 目标网络更新频率（单位：step）
 
     # === MLPNetwork 参数
     state_dim: int = 4                 # 状态维度（根据环境定义）
-    action_dim: int = 4               # 动作维度（根据环境定义）
+    action_dim: int = 4                # 动作维度（根据环境定义）
 
     # === env 参数 ===
     llm_model_len: int = 10000              # LLM模型长度
@@ -51,25 +51,27 @@ class RLSchedulerConfig:
     time_norm: float = 300.0           # 时间归一化因子
 
     # === reward 函数参数 ===
-    lambda_recent_comform_slo: float = 2.0         # 最近符合SLO请求奖励权重
+    lambda_recent_comform_slo: float = 2.0   # 最近符合SLO请求奖励权重
     lambda_decode: float = 1.0         # decode 奖励权重
     lambda_prefill: float = 1.0        # prefill 奖励权重
     lambda_finish: float = 2.0        # finish 奖励权重
 
     # === DualAttentionNetwork 参数 ===
-    Global_state_dim: int = 10          # G: 全局状态维度
+    Global_state_dim: int = 2          # G: 全局状态维度
     K_waiting: int = 5                # 取top-K个等待请求提取特征
     Feature_waiting: int = 2           # 等待队列特征维度
     K_running: int = 20                # 取top-K个运行请求提取特征
-    Feature_running: int = 2           # 运行队列特征维度
+    Feature_running: int = 3           # 运行队列特征维度
         
     # === RLOptimizer 参数 ===
     optimization_timeout_ms: float = 10.0    # 优化器超时时间（ms）
 
     # === Trainer 参数 ===
-    replay_buffer_size: int = 10000    # 经验回放缓冲区大小
-    train_batch_size: int = 128        # 训练批次大小
+    replay_buffer_size: int = 5000    # 经验回放缓冲区大小
+    train_batch_size: int = 64        # 训练批次大小
     train_total_time: float = 3600.0    # 训练总时间（单位：s）
+
+
 
     @classmethod
     def from_env(cls) -> 'RLSchedulerConfig':
@@ -91,7 +93,7 @@ class RLSchedulerConfig:
             rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),
             use_pretrained_model=os.getenv('VLLM_RL_USE_PRETRAINED_MODEL', 'false').lower() == 'true',
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
-            save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '180.0')),
+            save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '240.0')),
             log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '40')),
 
             # DQN 参数
@@ -119,18 +121,22 @@ class RLSchedulerConfig:
             lambda_finish=float(os.getenv('VLLM_RL_LAMBDA_FINISH', '2.0')),
 
             # DualAttentionNetwork 参数
-            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '10')),
+            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '2')),
             K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '5')),
             Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '2')),
             K_running=int(os.getenv('VLLM_RL_K_RUNNING', '20')),
-            Feature_running=int(os.getenv('VLLM_RL_FEATURE_RUNNING', '2')),
+            Feature_running=int(os.getenv('VLLM_RL_FEATURE_RUNNING', '3')),
 
             # RLOptimizer 参数
             optimization_timeout_ms=float(os.getenv('VLLM_RL_OPTIMIZATION_TIMEOUT_MS', '10.0')),
 
             # Trainer 参数
-            replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '10000')),
-            train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '128')),
+            replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '5000')),
+            train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '64')),
             train_total_time=float(os.getenv('VLLM_RL_TRAIN_TOTAL_TIME', '3600.0')),
         )
         return config
+
+    def to_dict(self):
+        """将配置转换为字典形式"""
+        return asdict(self)

@@ -53,13 +53,14 @@ class OpenAIBaseModel(BaseModel):
                     field_names.add(alias)
             cls.field_names = field_names
 
-        # Compare against both field names and aliases
-        if any(k not in field_names for k in data):
-            logger.warning(
-                "The following fields were present in the request "
-                "but ignored: %s",
-                data.keys() - field_names,
-            )
+        # 注释掉，因为我要外部传入请求的信息
+        # # Compare against both field names and aliases
+        # if any(k not in field_names for k in data):
+        #     logger.warning(
+        #         "The following fields were present in the request "
+        #         "but ignored: %s",
+        #         data.keys() - field_names,
+        #     )
         return result
 
 
@@ -522,6 +523,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structural_tag=self.structural_tag,
         )
 
+        # 添加请求的 extra 信息
+        extra = {}
+        if self.kv_transfer_params:
+            extra["kv_transfer_params"] = self.kv_transfer_params
+        if getattr(self, "__pydantic_extra__", None):
+            extra.update(self.__pydantic_extra__)
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -551,8 +559,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            extra_args=({"kv_transfer_params": self.kv_transfer_params}
-                        if self.kv_transfer_params else None))
+            extra_args=extra or None)
 
     def _get_guided_json_from_tool(
             self) -> Optional[Union[str, dict, BaseModel]]:

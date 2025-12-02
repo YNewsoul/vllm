@@ -266,6 +266,7 @@ class RLAgent:
         except Exception as e:
             logger.error(f"load model failed,from {model_path}, error: {e}")
             return False
+
     def env_info_to_state(self, env_info: Dict):
         now_time = env_info.get("now_time", 0.0)
         running = list(env_info.get("running_requests", []))
@@ -279,55 +280,41 @@ class RLAgent:
         prefill_reqs = [r for r in running if not self._is_decode_phase(r)]
 
         num_decode = len(decode_reqs)
-        frac_decode = num_decode / num_running if num_running > 0 else 0.0
-
-        # ---- Decode 统计 ----
-        if num_decode > 0:
-            decode_remaining = [(r.slo - (now_time - r.arrival_time)) / r.slo for r in decode_reqs]
-            avg_decode_remaining_slo = float(np.mean(decode_remaining))
-            min_decode_remaining_slo = float(np.min(decode_remaining))
-        else:
-            avg_decode_remaining_slo = min_decode_remaining_slo = 0.0
-
-        # ---- Prefill 特征 ----
-        if len(prefill_reqs) > 0:
-            r = prefill_reqs[0]
-            prefill_remaining_ratio = max(0.0, r.num_prompt_tokens - r.num_computed_tokens) / max(1.0, r.num_prompt_tokens)
-            prefill_remaining_slo_ratio = max(0.0, (r.slo - (now_time - r.arrival_time)) / r.slo)
-        else:
-            prefill_remaining_ratio = prefill_remaining_slo_ratio = 0.0
-
-        # ---- Waiting 特征 ----
-        if num_waiting > 0:
-            wait_remaining = [(r.slo - (now_time - r.arrival_time)) / r.slo for r in waiting]
-            wait_prompt_len = [r.num_prompt_tokens for r in waiting]
-            avg_wait_slo_ratio = float(np.mean(wait_remaining))
-            avg_wait_prompt_len = float(np.mean(wait_prompt_len)) / self.config.prompt_norm
-        else:
-            avg_wait_slo_ratio = avg_wait_prompt_len = 0.0
 
         # ---- Global 指标 ----
         recent_comform_slo_rate = float(env_info.get("recent_comform_slo_rate", 0.0))
-        last_token_budget = float(env_info.get("last_token_budget", 0.0)) / self.config.token_budget_norm
-        last_model_run_time = float(env_info.get("last_model_run_time", 0.0)) / self.config.time_norm
+        last_model_run_time = float(env_info.get("last_model_run_time", 0.0))
 
-        # ---- 组装 ----
+        # # 当前选择的token_budget（与奖励函数中的select_token_budget对应）
+        # current_token_budget = float(env_info.get("select_token_budget", 0.0)) / 2048
+
+        # ---- 组装全局向量 ----
         global_vec = np.array([
-            frac_decode,
-            avg_decode_remaining_slo, min_decode_remaining_slo,
-            prefill_remaining_ratio, prefill_remaining_slo_ratio,
-            avg_wait_slo_ratio, avg_wait_prompt_len,
-            recent_comform_slo_rate,
-            last_token_budget, last_model_run_time
+            recent_comform_slo_rate,            # 最近SLO满足率（长期奖励）
+            last_model_run_time,
         ], dtype=np.float32)
 
-        # ---- 等待队列 top-K （轻量 attention 输入）----
+        # ---- 运行队列 ----
+        running_feats, run_mask = [], []
         waiting_feats, wait_mask = [], []
+        for r in running[:self.config.K_running]:
+            urgency = np.tanh((r.slo - (now_time - r.arrival_time)) / 50.0)
+            if self._is_decode_phase(r):
+                progress = (r.max_tokens - (r.num_computed_tokens - r.num_prompt_tokens))/r.max_tokens
+                running_feats.append([progress, urgency,0.0])
+            else:
+                remaining_prefill  = (r.num_computed_tokens - r.num_prompt_tokens)/ self.config.prompt_norm
+                running_feats.append([remaining_prefill,urgency,1.0])
+            run_mask.append(1.0)
+        while len(running_feats) < self.config.K_running:
+            running_feats.append([0.0]*3)
+            run_mask.append(0.0)
+
+        # ---- 等待队列 top-K ----
         for r in waiting[:self.config.K_waiting]:
-            elapsed = now_time - r.arrival_time
-            remaining = (r.slo - elapsed) / r.slo
-            p_len = float(r.num_prompt_tokens) / self.config.prompt_norm
-            waiting_feats.append([p_len, remaining])
+            urgency = np.tanh((r.slo - (now_time - r.arrival_time)) / 50.0)
+            remaining_prefill = float(r.num_prompt_tokens) / self.config.prompt_norm
+            waiting_feats.append([remaining_prefill, urgency])
             wait_mask.append(1.0)
         while len(waiting_feats) < self.config.K_waiting:
             waiting_feats.append([0.0]*2)
@@ -335,17 +322,6 @@ class RLAgent:
 
         wait_arr = np.array(waiting_feats, dtype=np.float32)
         wait_mask = np.array(wait_mask, dtype=np.float32)
-
-        # ---- running attention 输入（decode+prefill）----
-        running_feats, run_mask = [], []
-        for r in running[:self.config.K_running]:
-            is_dec = 1.0 if self._is_decode_phase(r) else 0.0
-            remaining_slo = (r.slo - (now_time - r.arrival_time)) / r.slo
-            running_feats.append([is_dec, remaining_slo])
-            run_mask.append(1.0)
-        while len(running_feats) < self.config.K_running:
-            running_feats.append([0.0]*2)
-            run_mask.append(0.0)
 
         run_arr = np.array(running_feats, dtype=np.float32)
         run_mask = np.array(run_mask, dtype=np.float32)

@@ -2,6 +2,7 @@ import threading
 import logging
 import random
 import time
+import math
 from collections import deque
 
 try:
@@ -86,6 +87,7 @@ class Trainer:
         rew_finish = 0
         finish_count = 0
         total_prompt_count = 0
+
         for req in before_running_req:
             output_tokens = req.num_computed_tokens - req.num_prompt_tokens
             if output_tokens>= 0:
@@ -97,29 +99,42 @@ class Trainer:
                     else:
                         rew_finish -= 1
                     finish_count += 1
-                elif ((req.max_tokens/2 - output_tokens)*model_run_time/1000) <= (req.slo-(before_time-req.arrival_time)):
+                elif ((req.max_tokens - output_tokens)*model_run_time/1000) <= (req.slo-(before_time-req.arrival_time)):
                     rew_decode += 1
                 else:
                     rew_decode -= 1
             else:
                 # prefill 请求
                 total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens
-        
+                predict_remaining_time = (math.ceil(total_prompt_count/select_token_budget) + (req.max_tokens/2))*model_run_time/1000
+                if predict_remaining_time <= (req.slo-(before_time-req.arrival_time)):
+                    rew_prefill += 1
+                else:
+                    rew_prefill -= 1
+                
         for req in before_waiting_req:
             total_prompt_count += req.num_prompt_tokens
+            predict_remaining_time = (math.ceil(total_prompt_count/select_token_budget) + (req.max_tokens/2))*model_run_time/1000
+            if predict_remaining_time <= (req.slo-(before_time-req.arrival_time)):
+                rew_prefill += 1
+            else:
+                rew_prefill -= 1
 
         rew_decode /= (len(before_running_req)-1)
         rew_finish = rew_finish/finish_count if finish_count > 0 else 0
-        rew_prefill = float(f"{select_token_budget/2048:.3f}")*(total_prompt_count/20480)
+        rew_finish = 0
+        rew_prefill = rew_prefill/(1 + len(before_waiting_req))
+
+        rew_token_budget = select_token_budget/2048
 
         # ========== 2 长期奖励 ==========
         # ---------- 2.1 最近一段时间/n个请求的SLO 满足情况 ----------
         recent_comform_slo_rate = after_env_info.get("recent_comform_slo_rate", 0.0)
 
         # ---------- 综合 ----------
-        reward = (self.config.lambda_recent_comform_slo * recent_comform_slo_rate) + \
-                (self.config.lambda_decode * float(f"{rew_decode:.3f}")) + \
+        reward = (self.config.lambda_decode * float(f"{rew_decode:.3f}")) + \
                 (self.config.lambda_prefill * rew_prefill) + \
-                (self.config.lambda_finish * rew_finish)
+                (self.config.lambda_finish * rew_finish) + \
+                rew_token_budget
 
         return reward
