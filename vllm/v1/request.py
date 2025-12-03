@@ -98,6 +98,7 @@ class Request:
 
         self.arrival_time = self.extra_data.get('arrival_time', None)
         self.ttft_slo = self.extra_data.get('ttft_slo', None)
+        self.ttft = None
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":

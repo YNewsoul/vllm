@@ -59,8 +59,8 @@ class RLSchedulerConfig:
     # === DualAttentionNetwork 参数 ===
     Global_state_dim: int = 2          # G: 全局状态维度
     K_waiting: int = 5                # 取top-K个等待请求提取特征
-    Feature_waiting: int = 2           # 等待队列特征维度
-    K_running: int = 20                # 取top-K个运行请求提取特征
+    Feature_waiting: int = 3           # 等待队列特征维度
+    K_running: int = 10                # 取top-K个运行请求提取特征
     Feature_running: int = 3           # 运行队列特征维度
         
     # === RLOptimizer 参数 ===
@@ -123,8 +123,8 @@ class RLSchedulerConfig:
             # DualAttentionNetwork 参数
             Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '2')),
             K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '5')),
-            Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '2')),
-            K_running=int(os.getenv('VLLM_RL_K_RUNNING', '20')),
+            Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '3')),
+            K_running=int(os.getenv('VLLM_RL_K_RUNNING', '10')),
             Feature_running=int(os.getenv('VLLM_RL_FEATURE_RUNNING', '3')),
 
             # RLOptimizer 参数

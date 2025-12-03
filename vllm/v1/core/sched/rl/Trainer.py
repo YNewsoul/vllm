@@ -3,6 +3,7 @@ import logging
 import random
 import time
 import math
+import numpy as np
 from collections import deque
 
 try:
@@ -76,7 +77,6 @@ class Trainer:
         before_time = before_env_info.get("now_time")
 
         after_running_req = after_env_info.get("running_requests",[])
-        after_req_ids = [req.request_id for req in after_running_req]
         after_time = after_env_info.get("now_time")
         model_run_time = after_env_info.get("model_run_time",0.0)
         select_token_budget = after_env_info.get("select_token_budget", 0)
@@ -84,57 +84,47 @@ class Trainer:
         # ========== 1 短期奖励 ==========
         rew_decode = 0
         rew_prefill = 0
-        rew_finish = 0
-        finish_count = 0
         total_prompt_count = 0
 
         for req in before_running_req:
+            # 运行的请求
             output_tokens = req.num_computed_tokens - req.num_prompt_tokens
             if output_tokens>= 0:
                 # decode 阶段请求
-                if req.request_id not in after_req_ids:
-                    # 该请求在after_running_req中不存在，说明该请求在此轮完成
-                    if after_time - req.arrival_time <= req.slo:
-                        rew_finish += 1
+                # 当超过20%的时候再考虑tpot，因为有可能一开始tpot就超了
+                if output_tokens > req.max_tokens*0.2:
+                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000
+                    if tpot <= 50:
+                        rew_decode += 1
                     else:
-                        rew_finish -= 1
-                    finish_count += 1
-                elif ((req.max_tokens - output_tokens)*model_run_time/1000) <= (req.slo-(before_time-req.arrival_time)):
-                    rew_decode += 1
-                else:
-                    rew_decode -= 1
+                        rew_decode += np.tanh((50-tpot)/50)
             else:
                 # prefill 请求
                 total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens
-                predict_remaining_time = (math.ceil(total_prompt_count/select_token_budget) + (req.max_tokens/2))*model_run_time/1000
-                if predict_remaining_time <= (req.slo-(before_time-req.arrival_time)):
+                ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000
+                if ttft_remaining_time <= (req.ttft_slo-(before_time-req.arrival_time)):
                     rew_prefill += 1
                 else:
-                    rew_prefill -= 1
+                    rew_prefill -=  np.tanh((ttft_remaining_time + before_time-req.arrival_time -req.ttft_slo)/req.ttft_slo)
                 
         for req in before_waiting_req:
+            # 等待的请求
             total_prompt_count += req.num_prompt_tokens
-            predict_remaining_time = (math.ceil(total_prompt_count/select_token_budget) + (req.max_tokens/2))*model_run_time/1000
-            if predict_remaining_time <= (req.slo-(before_time-req.arrival_time)):
+            ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000
+            if ttft_remaining_time <= (req.ttft_slo-(before_time-req.arrival_time)):
                 rew_prefill += 1
             else:
-                rew_prefill -= 1
+                rew_prefill -=  np.tanh((ttft_remaining_time + before_time-req.arrival_time -req.ttft_slo)/req.ttft_slo)
 
         rew_decode /= (len(before_running_req)-1)
-        rew_finish = rew_finish/finish_count if finish_count > 0 else 0
-        rew_finish = 0
         rew_prefill = rew_prefill/(1 + len(before_waiting_req))
 
+        # 正向奖励
         rew_token_budget = select_token_budget/2048
-
-        # ========== 2 长期奖励 ==========
-        # ---------- 2.1 最近一段时间/n个请求的SLO 满足情况 ----------
-        recent_comform_slo_rate = after_env_info.get("recent_comform_slo_rate", 0.0)
 
         # ---------- 综合 ----------
         reward = (self.config.lambda_decode * float(f"{rew_decode:.3f}")) + \
-                (self.config.lambda_prefill * rew_prefill) + \
-                (self.config.lambda_finish * rew_finish) + \
+                (self.config.lambda_prefill * float(f"{rew_prefill:.3f}")) + \
                 rew_token_budget
 
         return reward

@@ -99,7 +99,6 @@ class RLAgent:
         self._update_count = 1  
 
     def _initialize_log_file(self):
-        # 当前目录
         current_dir = os.path.dirname(os.path.abspath(__file__))
         # 创建存储日志目录
         training_logs_dir = os.path.join(current_dir, "training_logs")
@@ -272,39 +271,38 @@ class RLAgent:
         running = list(env_info.get("running_requests", []))
         waiting = list(env_info.get("waiting_requests", []))
 
-        num_running = len(running)
-        num_waiting = len(waiting)
-
-        # ---- Decode & Prefill 分类 ----
-        decode_reqs = [r for r in running if self._is_decode_phase(r)]
-        prefill_reqs = [r for r in running if not self._is_decode_phase(r)]
-
-        num_decode = len(decode_reqs)
-
         # ---- Global 指标 ----
         recent_comform_slo_rate = float(env_info.get("recent_comform_slo_rate", 0.0))
-        last_model_run_time = float(env_info.get("last_model_run_time", 0.0))
+        last_model_run_time = float(env_info.get("last_model_run_time", 0.0))/300
 
-        # # 当前选择的token_budget（与奖励函数中的select_token_budget对应）
-        # current_token_budget = float(env_info.get("select_token_budget", 0.0)) / 2048
-
-        # ---- 组装全局向量 ----
+        # ---- 全局向量 ----
         global_vec = np.array([
-            recent_comform_slo_rate,            # 最近SLO满足率（长期奖励）
+            recent_comform_slo_rate,
             last_model_run_time,
-        ], dtype=np.float32)
+        ])
 
         # ---- 运行队列 ----
         running_feats, run_mask = [], []
         waiting_feats, wait_mask = [], []
+        remain_prefill_tokens = 0
         for r in running[:self.config.K_running]:
-            urgency = np.tanh((r.slo - (now_time - r.arrival_time)) / 50.0)
-            if self._is_decode_phase(r):
-                progress = (r.max_tokens - (r.num_computed_tokens - r.num_prompt_tokens))/r.max_tokens
-                running_feats.append([progress, urgency,0.0])
+            output_tokens = r.num_computed_tokens - r.num_prompt_tokens
+
+            if output_tokens >= 0:
+                # decode请求
+                # 1.当前 TPOT
+                if output_tokens == 0：
+                    tpot_status = 0.0
+                else:
+                    tpot_status = np.tanh((50-(now_time - r.ttft)/output_tokens*1000)/50)
+                # 2.进度比例 (用于判断是否超过 20% 阈值)
+                progress = np.tanh(output_tokens / r.max_tokens*0.2)
+                running_feats.append([progress, tpot_status,1.0])
             else:
-                remaining_prefill  = (r.num_computed_tokens - r.num_prompt_tokens)/ self.config.prompt_norm
-                running_feats.append([remaining_prefill,urgency,1.0])
+                remain_prefill_tokens -= output_tokens
+                remaining_prefill  = np.tanh(remain_prefill_tokens/ self.config.prompt_norm)
+                urgency = np.tanh((r.ttft_slo - (now_time - r.arrival_time)) / 50.0)
+                running_feats.append([remaining_prefill,urgency,-1.0])
             run_mask.append(1.0)
         while len(running_feats) < self.config.K_running:
             running_feats.append([0.0]*3)
@@ -312,12 +310,13 @@ class RLAgent:
 
         # ---- 等待队列 top-K ----
         for r in waiting[:self.config.K_waiting]:
-            urgency = np.tanh((r.slo - (now_time - r.arrival_time)) / 50.0)
-            remaining_prefill = float(r.num_prompt_tokens) / self.config.prompt_norm
-            waiting_feats.append([remaining_prefill, urgency])
+            urgency = np.tanh((r.ttft_slo - (now_time - r.arrival_time)) / 50.0)
+            remain_prefill_tokens += r.num_prompt_tokens
+            remaining_prefill = np.tanh(remain_prefill_tokens / self.config.prompt_norm)
+            waiting_feats.append([remaining_prefill, urgency,-1])
             wait_mask.append(1.0)
         while len(waiting_feats) < self.config.K_waiting:
-            waiting_feats.append([0.0]*2)
+            waiting_feats.append([0.0]*3)
             wait_mask.append(0.0)
 
         wait_arr = np.array(waiting_feats, dtype=np.float32)
@@ -329,12 +328,7 @@ class RLAgent:
         return global_vec, wait_arr, run_arr, wait_mask, run_mask
 
     def _is_decode_phase(self, request) -> bool:
-        """判断请求是否处于decode阶段"""
-        try:
-            return request.num_computed_tokens >= request.num_prompt_tokens
-        except AttributeError:
-            # 如果字段不存在，假设是prefill阶段
-            return False
+        return request.num_computed_tokens >= request.num_prompt_tokens
 
     def _write_log_data(self, log_data):
         """写入日志数据"""

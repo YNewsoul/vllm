@@ -210,13 +210,9 @@ class Scheduler(SchedulerInterface):
         self.rl_env_info = {'running_requests': None,
                 'waiting_requests': None,
                 'now_time': None,
-                'recent_throughput': 0.0,
-                'recent_avg_latency': 0.0,
                 'recent_comform_slo_rate': 0.0,
-                'current_throughput': 0.0,
                 'last_token_budget':0.0,
                 'select_token_budget':0.0,
-                'actual_token_budget':0.0,
                 'last_model_run_time':0.0,
                 'model_run_time':0.0}
 
@@ -906,6 +902,7 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens # 每个请求调度的token数量
 
+
         # 初始化用于存储处理结果的数据结构
         new_running: list[Request] = [] # 存储处理后仍在运行的请求
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
@@ -923,6 +920,9 @@ class Scheduler(SchedulerInterface):
                 # 如果请求在本步骤未被调度，直接添加到新的运行列表
                 new_running.append(request)
                 continue
+            
+            if not request.ttft and num_tokens_scheduled == 1:
+                request.ttft = time.monotonic() - request.arrival_time
 
             # 获取请求在模型输出中的索引位置
             req_index = model_runner_output.req_id_to_index[req_id]
@@ -1112,13 +1112,13 @@ class Scheduler(SchedulerInterface):
 
             if request.status == RequestStatus.RUNNING:
                 
-                # if self.rl_scheduler and self.rl_scheduler.enabled:
-                #     now = time.monotonic()
-                #     comform_slo = False
-                #     if now - request.arrival_time < request.ttft_slo:
-                #         comform_slo = True
-
-                #     self.rl_data_collection.add_rl_finished_req(comform_slo)
+                if self.rl_scheduler and self.rl_scheduler.enabled:
+                    now = time.monotonic()
+                    comform_slo = False
+                    output_tokens = request.num_computed_tokens - request.num_prompt_tokens
+                    if request.ttft < request.ttft_slo and (now - request.ttft)*1000 < 50*output_tokens:
+                        comform_slo = True
+                    self.rl_data_collection.add_rl_finished_req(comform_slo)
                 self.running.remove(request)
             else:
                 self.waiting.remove(request)
@@ -1338,11 +1338,6 @@ class Scheduler(SchedulerInterface):
         if not self.current_batch_rl_data:
             return
         self.current_batch_rl_data.update({"model_run_ms":float(f"{model_run_duration*1000:.3f}")})
-        actual_total_tokens = self.current_batch_rl_data.get('total_num_scheduled_tokens', 0)
-        actual_latency = model_run_duration # s
-
-        self.rl_data_collection.add_throughput(actual_total_tokens,actual_latency)
-        self.rl_data_collection.add_latency(actual_latency)
 
         if self.use_rl_scheduler:
             # 当使用rl 调度时才更新rl环境信息
@@ -1434,10 +1429,6 @@ class Scheduler(SchedulerInterface):
         self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
         self.rl_env_info['last_model_run_time'] = self.rl_env_info['model_run_time']
         if After:
-            self.rl_env_info['recent_throughput'] = self.rl_data_collection.get_throughput()
-            self.rl_env_info['recent_avg_latency'] = self.rl_data_collection.get_avg_latency()
-            self.rl_env_info['current_throughput'] = self.rl_data_collection.get_current_throughput()
             self.rl_env_info['select_token_budget'] = self.rl_data_collection.get_select_token_budget()
             self.rl_env_info['last_token_budget'] = self.rl_data_collection.get_last_token_budget()
-            self.rl_env_info['actual_token_budget'] = self.current_batch_rl_data.get('total_num_scheduled_tokens', 0)
             self.rl_env_info['model_run_time'] = self.current_batch_rl_data.get('model_run_ms',0)
