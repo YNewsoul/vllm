@@ -59,9 +59,10 @@ class RLScheduler:
         token_budget = self._RL_schedule_judge(env_info)
         use_rl_scheduler = False
         if not token_budget:
-            if self.rl_agent.train_enabled:
-                self.env.set_before_env_info(env_info)
-            token_budget = self.rl_agent.select(env_info)
+            # if self.rl_agent.train_enabled:
+            #     self.env.set_before_env_info(env_info)
+            # token_budget = self.rl_agent.select(env_info)
+            token_budget = env_info['max_num_scheduled_tokens']
             use_rl_scheduler = True
        
         time_rl_agent_select = (time.monotonic() - start_rl_schedule_time)*1000

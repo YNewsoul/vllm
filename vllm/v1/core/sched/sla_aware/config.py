@@ -71,7 +71,7 @@ class SLASchedulerConfig:
             config = cls(
                 # 功能开关
                 # 默认开启sla
-                enabled=os.getenv('VLLM_SLA_SCHEDULER_ENABLED', 'true').lower() == 'true',
+                enabled=os.getenv('VLLM_SLA_SCHEDULER_ENABLED', 'false').lower() == 'true',
                 fallback_on_error=os.getenv('VLLM_SLA_FALLBACK_ON_ERROR', 'true').lower() == 'true',
                 
                 # 性能模型配置

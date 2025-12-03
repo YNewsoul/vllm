@@ -885,39 +885,6 @@ class Scheduler(SchedulerInterface):
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
-    def _compute_load_aware_budget_v2(self) -> tuple[int, float]:
-        """
-        根据负载自适应计算本步的总 token 预算。
-
-        返回:
-          - B_cap: 本步总 token 预算（受 TPOT 与目标批时长约束）
-          - T_set_ms: 目标批时长
-        """
-        # 目标批时长：随等待队列长度线性升降，夹在 [T_min_eff, TPOT]
-        if self.la_q_high > 0:
-            k = (self.slo_tpot_ms - self.la_t_min_ms) / self.la_q_high
-        else:
-            k = 0.0
-        Q = len(self.waiting)
-        # 有截距时，若 T_set < intercept 则 (T_set - intercept)/alpha 为负，导致0 token。
-        # 为避免死等，设置有效下界 T_min_eff 至少能容纳 1 token。
-        T_min_eff = max(self.la_t_min_ms, self.la_intercept_ms + self.la_alpha_ms_per_token)
-        T_target = self.la_t_min_ms + k * Q
-        T_set = max(T_min_eff, min(self.slo_tpot_ms, T_target))
-
-        # token 预算上限：由线性模型反解得到
-        # tokens <= (T - intercept) / slope
-        if self.la_alpha_ms_per_token <= 0:
-            B_tpot = 0
-            B_cap_time = 0
-        else:
-            B_tpot = int(max(0.0, (self.slo_tpot_ms - self.la_intercept_ms) / self.la_alpha_ms_per_token))
-            B_cap_time = int(max(0.0, (T_set - self.la_intercept_ms) / self.la_alpha_ms_per_token))
-        B_cap = min(B_cap_time, B_tpot)
-        B_cap = max(0, B_cap)
-
-        return B_cap, T_set
-
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -1145,13 +1112,13 @@ class Scheduler(SchedulerInterface):
 
             if request.status == RequestStatus.RUNNING:
                 
-                if self.rl_scheduler and self.rl_scheduler.enabled:
-                    now = time.monotonic()
-                    comform_slo = False
-                    if now - request.arrival_time < request.slo:
-                        comform_slo = True
+                # if self.rl_scheduler and self.rl_scheduler.enabled:
+                #     now = time.monotonic()
+                #     comform_slo = False
+                #     if now - request.arrival_time < request.ttft_slo:
+                #         comform_slo = True
 
-                    self.rl_data_collection.add_rl_finished_req(comform_slo)
+                #     self.rl_data_collection.add_rl_finished_req(comform_slo)
                 self.running.remove(request)
             else:
                 self.waiting.remove(request)
@@ -1226,16 +1193,6 @@ class Scheduler(SchedulerInterface):
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
     
-    def get_sla_scheduler_status(self) -> Optional[dict[str, Any]]:
-        """获取SLA调度器状态信息
-        
-        Returns:
-            SLA调度器状态字典，如果SLA调度器不可用则返回None
-        """
-        if self.sla_scheduler:
-            return self.sla_scheduler.get_status()
-        return None
-
     ########################################################################
     # KV Connector Related Methods
     ########################################################################
@@ -1324,7 +1281,7 @@ class Scheduler(SchedulerInterface):
         chunk_sizes = []
         num_computed_tokens = []
         num_cached_tokens = []
-        req_slo = []
+        req_ttft_slo = []
         remaining_time = []
         
         now_time = time.monotonic()
@@ -1337,8 +1294,8 @@ class Scheduler(SchedulerInterface):
                 chunk_sizes.append(req_tokens)
                 num_computed_tokens.append(req.num_computed_tokens)
                 num_cached_tokens.append(req.num_cached_tokens)
-                req_slo.append(req.slo)
-                remaining_time.append(f"{(req.slo - (now_time - req.arrival_time)):.3f}")
+                req_ttft_slo.append(req.ttft_slo)
+                remaining_time.append(f"{(req.ttft_slo - (now_time - req.arrival_time)):.3f}")
         now_time = time.time()
         # 准备统计信息（不包含model run时间）
         self.current_batch_profiling_data = {
@@ -1350,7 +1307,7 @@ class Scheduler(SchedulerInterface):
             "chunk_sizes": chunk_sizes,
             "computed_tokens": num_computed_tokens,
             "cached_tokens": num_cached_tokens,
-            "slo": req_slo,
+            "ttft_slo": req_ttft_slo,
             "remaining_time": remaining_time,
             "schedule_ms": f"{schedule_duration * 1000:.3f}",
             "num_waiting": len(self.waiting),
