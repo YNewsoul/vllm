@@ -921,7 +921,7 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
             
-            if not request.ttft and num_tokens_scheduled == 1:
+            if self.rl_scheduler and self.rl_scheduler.enabled and not request.ttft and num_tokens_scheduled == 1:
                 request.ttft = time.monotonic() - request.arrival_time
 
             # 获取请求在模型输出中的索引位置

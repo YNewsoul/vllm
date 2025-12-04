@@ -94,10 +94,11 @@ class Request:
 
     def _set_other_attribute(self):
 
-        self.extra_data = self.sampling_params.extra_args.get('extra_data', None)
-
-        self.arrival_time = self.extra_data.get('arrival_time', None)
-        self.ttft_slo = self.extra_data.get('ttft_slo', None)
+        if self.sampling_params.extra_args:
+            self.extra_data = self.sampling_params.extra_args.get('extra_data', None)
+            if self.extra_data:
+                self.arrival_time = self.extra_data.get('arrival_time', None)
+                self.ttft_slo = self.extra_data.get('ttft_slo', None)
         self.ttft = None
 
     @classmethod
