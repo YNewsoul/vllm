@@ -12,7 +12,7 @@ except ImportError:
     logger = logging.getLogger(__name__)
 
 class RequestSnapshot(namedtuple('RequestSnapshot', ['request_id', 'num_computed_tokens', 
-                                'num_prompt_tokens', 'arrival_time', 'slo','max_tokens'])):
+                                'num_prompt_tokens', 'arrival_time', 'ttft_slo','max_tokens','ttft'])):
     """请求的轻量级快照，只包含RL决策所需的关键信息"""
     __slots__ = ()
 
@@ -62,9 +62,7 @@ class Env:
 
     def set_before_env_info(self,before_env_info:Dict):
         self.before_env_info = None
-        time_1 = time.monotonic()
         self.before_env_info = self._create_env_snapshot(before_env_info)
-        time_2 = time.monotonic()
         
     def set_after_env_info(self,after_env_info:Dict):
         self.after_env_info = None

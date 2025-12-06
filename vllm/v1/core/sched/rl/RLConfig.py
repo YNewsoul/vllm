@@ -15,9 +15,6 @@ class RLSchedulerConfig:
     # === 通用 ===
     verbose_logging: bool = False       # 是否启用详细日志记录
 
-    # === RLScheduler 参数 ===
-    enabled: bool = False              # 是否启用RL SLA调度器
-    
     # === RLUtils 参数 ===
     rl_finished_reqs_buffer_size: int = 10  # 已完成请求缓冲区大小
     throughput_buffer_size: int = 100  # 吞吐缓冲区大小
@@ -29,7 +26,7 @@ class RLSchedulerConfig:
     rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
     use_pretrained_model: bool = False  # 是否使用预训练模型
     pretrained_model_path: str = ""     # 预训练模型路径
-    save_model_frequency: float = 240.0  # 保存模型频率（单位：秒）
+    save_model_frequency: float = 300.0  # 保存模型频率（单位：秒）
     log_frequency: int = 40           # 日志记录频率（单位：step）
 
     # === DQN 参数 ===
@@ -78,10 +75,7 @@ class RLSchedulerConfig:
         config = cls(
             # 通用
             verbose_logging=os.getenv('VLLM_RL_VERBOSE_LOGGING', 'false').lower() == 'true',
-
-            # RLScheduler 参数
-            enabled=os.getenv('VLLM_RL_SCHEDULER_ENABLED', 'false').lower() == 'true',
-            
+ 
             # RLUtils 参数
             rl_finished_reqs_buffer_size=int(os.getenv('VLLM_RL_FINISHED_REQS_BUFFER_SIZE', '10')),
             throughput_buffer_size=int(os.getenv('VLLM_RL_THROUGHPUT_BUFFER_SIZE', '100')),
@@ -93,7 +87,7 @@ class RLSchedulerConfig:
             rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),
             use_pretrained_model=os.getenv('VLLM_RL_USE_PRETRAINED_MODEL', 'false').lower() == 'true',
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
-            save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '240.0')),
+            save_model_frequency=float(os.getenv('VLLM_RL_SAVE_MODEL_FREQUENCY', '300.0')),
             log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '40')),
 
             # DQN 参数

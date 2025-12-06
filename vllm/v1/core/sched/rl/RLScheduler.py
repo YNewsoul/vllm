@@ -40,44 +40,34 @@ class RLScheduler:
         self.rl_agent = RLAgent()
         self.trainer = Trainer(self.rl_agent)
 
-        # 状态管理
-        self.enabled = self.config.enabled
-        
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.time_out_info_path = os.path.join(current_dir, "timeout_info.jsonl")
         
-        if self.enabled:
-            logger.info(f"RL Scheduler initialized successfully!")
-        else:
-            logger.info("RL Scheduler disabled by configuration")
-    
     def compute_schedule_decision(self,env_info:Dict):
         """计算 RL 调度决策 """
         
         # Phase 1:从 RLAgent中选择 token_budget
         start_rl_schedule_time = time.monotonic()
         token_budget = self._RL_schedule_judge(env_info)
-        use_rl_scheduler = False
+        use_rl_schedule = False
         if not token_budget:
-            # if self.rl_agent.train_enabled:
-            #     self.env.set_before_env_info(env_info)
-            # token_budget = self.rl_agent.select(env_info)
+            self.env.set_before_env_info(env_info)
+            token_budget = self.rl_agent.select(env_info)
             token_budget = env_info['max_num_scheduled_tokens']
-            use_rl_scheduler = True
+            use_rl_schedule = True
        
         time_rl_agent_select = (time.monotonic() - start_rl_schedule_time)*1000
         if time_rl_agent_select>=3 :
-            self._write_timeout_info(use_rl_scheduler,time_rl_agent_select)
+            self._write_timeout_info(use_rl_schedule,time_rl_agent_select)
 
         return {
             'token_budget': token_budget,
-            'use_rl_scheduler': use_rl_scheduler,
+            'use_rl_schedule': use_rl_schedule,
         }
 
     def get_simple_status(self) -> Dict[str, Any]:
         """获取简化的状态信息，用于快速监控"""
         return {
-            'enabled': self.enabled,
             'train':self.rl_agent.train_enabled,
         }
 
@@ -91,13 +81,13 @@ class RLScheduler:
             
         # self.stats['total_performance_records'] += 1
 
-    def _write_timeout_info(self,use_rl_scheduler,time_rl_agent_select):
+    def _write_timeout_info(self,use_rl_schedule,time_rl_agent_select):
         
         timestamp = time.time()
         data = {
             "timestamp":f"{timestamp:.3f}",
             "time":datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "use_rl_scheduler":use_rl_scheduler,
+            "use_rl_schedule":use_rl_schedule,
             "time_rl_agent_select": f"{time_rl_agent_select:.3f}",
         }
         try:

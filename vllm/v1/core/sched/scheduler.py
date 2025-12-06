@@ -13,7 +13,6 @@ from copy import deepcopy
 # 添加profiling相关的导入
 import json
 import os
-import math
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
@@ -201,24 +200,26 @@ class Scheduler(SchedulerInterface):
         if self.enable_profiling and self.profiling_log_file:
             logger.info(f"The profiling log file: {self.profiling_log_file}")
 
-        self.batch_counter = 0 # 调度 batch-id 计数
+        self.batch_id = 0 
         self.last_schedule_end_time: Optional[float] = None # 记录调度完成时间，用于计算model run时间
         self.current_batch_profiling_data: Optional[dict] = None # 当前batch的profiling数据，用于log和SLA调度
         self.current_batch_rl_data: Optional[dict] = None # 当前batch的用于提供给rl scheduler的数据
 
         # RL 环境相关信息
-        self.rl_env_info = {'running_requests': None,
-                'waiting_requests': None,
-                'now_time': None,
-                'recent_comform_slo_rate': 0.0,
-                'last_token_budget':0.0,
-                'select_token_budget':0.0,
-                'last_model_run_time':0.0,
-                'model_run_time':0.0}
+        self.rl_env_info = {
+            'running_requests': None,
+            'waiting_requests': None,
+            'now_time': None,
+            'recent_comform_slo_rate': 0.0,
+            'last_token_budget':0.0,
+            'select_token_budget':0.0,
+            'last_model_run_time':0.0,
+            'model_run_time':0.0}
 
         # 初始化 RL 调度
         self.rl_scheduler = None
-        if RL_SCHEDULER_AVAILABLE:
+        VLLM_RL_SCHEDULER_ENABLED = os.getenv('VLLM_RL_SCHEDULER_ENABLED', 'false').lower() == 'true'
+        if RL_SCHEDULER_AVAILABLE and VLLM_RL_SCHEDULER_ENABLED:
             try:
                 self.rl_scheduler = RLScheduler()
                 self.rl_data_collection = RLDataCollection()
@@ -243,7 +244,7 @@ class Scheduler(SchedulerInterface):
         # else:
         #     logger.debug("ELRAR Engine Agent not available")
         
-        self.use_rl_scheduler = False
+        self.use_rl_schedule = False
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -277,21 +278,18 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int] = {} # 记录每个请求已调度的token数
         
         # 使用 RL 调度器
-        if self.rl_scheduler and self.rl_scheduler.enabled:
+        if self.rl_scheduler:
             # 更新环境
             self.update_rl_env_info()
             rl_schedule_decision = self.rl_scheduler.compute_schedule_decision(self.rl_env_info)
             token_budget = rl_schedule_decision['token_budget']
-            self.use_rl_scheduler = rl_schedule_decision['use_rl_scheduler']
+            self.use_rl_schedule = rl_schedule_decision['use_rl_schedule']
             self.rl_data_collection.set_select_token_budget(token_budget)
         else:
             # RL调度器不可用
             rl_schedule_decision = None
             token_budget = self.max_num_scheduled_tokens
         
-        # 统一夹紧到全局上限，确保不超过系统限制
-        token_budget = min(token_budget, self.max_num_scheduled_tokens)
-
         # Encoder-related. 编码器相关
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
@@ -749,16 +747,13 @@ class Scheduler(SchedulerInterface):
                 select_token_budget = rl_schedule_decision['token_budget']
             self._prepare_schedule_profiling(
                 schedule_duration=schedule_end_time-schedule_start_time,
-                scheduled_new_reqs=scheduled_new_reqs,
-                scheduled_resumed_reqs=scheduled_resumed_reqs, 
-                scheduled_running_reqs=scheduled_running_reqs,
                 num_scheduled_tokens=num_scheduled_tokens,
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
                 select_token_budget=select_token_budget
             )
         
         # 记录 RL 调度器所选的信息
-        if self.rl_scheduler and self.rl_scheduler.enabled:
+        if self.rl_scheduler:
             self.current_batch_rl_data = {
                 "schedule_time":schedule_end_time-schedule_start_time,
                 "num_scheduled_requests":len(num_scheduled_tokens),
@@ -888,13 +883,11 @@ class Scheduler(SchedulerInterface):
     ) -> dict[int, EngineCoreOutputs]:
         """处理LLM运行一个iteration后的数据"""
         
-        # 计算model run时间（无论是否启用profiling都需要）
-        if self.last_schedule_end_time is not None:
-            model_run_duration = time.monotonic() - self.last_schedule_end_time
+        model_run_duration = time.monotonic() - self.last_schedule_end_time
             
-            # Profiling数据记录（仅在启用时）
-            if self.enable_profiling:
-                self._finalize_and_log_profiling(model_run_duration)
+        # Profiling数据记录
+        if self.enable_profiling:
+            self._finalize_and_log_profiling(model_run_duration)
 
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
@@ -921,7 +914,8 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
             
-            if self.rl_scheduler and self.rl_scheduler.enabled and not request.ttft and num_tokens_scheduled == 1:
+            # 记录 ttft 时间
+            if request.ttft is None and num_tokens_scheduled == 1:
                 request.ttft = time.monotonic() - request.arrival_time
 
             # 获取请求在模型输出中的索引位置
@@ -1073,7 +1067,7 @@ class Scheduler(SchedulerInterface):
                 self.make_stats(spec_decoding_stats))
 
         # 记录RL调度器性能
-        if self.rl_scheduler and self.rl_scheduler.enabled :
+        if self.rl_scheduler:
             self._record_rl_scheduler_performance(model_run_duration)
             
         return engine_core_outputs
@@ -1112,7 +1106,7 @@ class Scheduler(SchedulerInterface):
 
             if request.status == RequestStatus.RUNNING:
                 
-                if self.rl_scheduler and self.rl_scheduler.enabled:
+                if self.rl_scheduler:
                     now = time.monotonic()
                     comform_slo = False
                     output_tokens = request.num_computed_tokens - request.num_prompt_tokens
@@ -1265,12 +1259,8 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
 
-    def _prepare_schedule_profiling(
-        self,
+    def _prepare_schedule_profiling(self,
         schedule_duration:float,
-        scheduled_new_reqs: list,
-        scheduled_resumed_reqs: list,
-        scheduled_running_reqs: list,
         num_scheduled_tokens: dict[str, int],
         total_num_scheduled_tokens: int,
         select_token_budget:float
@@ -1281,8 +1271,8 @@ class Scheduler(SchedulerInterface):
         chunk_sizes = []
         num_computed_tokens = []
         num_cached_tokens = []
-        req_ttft_slo = []
-        remaining_time = []
+        ttft_slo = []
+        remaining_ttft_slo = []
         
         now_time = time.monotonic()
         
@@ -1294,21 +1284,22 @@ class Scheduler(SchedulerInterface):
                 chunk_sizes.append(req_tokens)
                 num_computed_tokens.append(req.num_computed_tokens)
                 num_cached_tokens.append(req.num_cached_tokens)
-                req_ttft_slo.append(req.ttft_slo)
-                remaining_time.append(f"{(req.ttft_slo - (now_time - req.arrival_time)):.3f}")
+                if self.rl_scheduler:
+                    ttft_slo.append(req.ttft_slo)
+                    remaining_ttft_slo.append(f"{(req.ttft_slo - (now_time - req.arrival_time)):.3f}")
         now_time = time.time()
         # 准备统计信息（不包含model run时间）
         self.current_batch_profiling_data = {
-            "batch_id": self.batch_counter,
+            "batch_id": self.batch_id,
             "timestamp": f"{now_time:.3f}",
             "select_token_budget": select_token_budget,
-            "rl_scheduler":self.use_rl_scheduler,
+            "rl_schedule":self.use_rl_schedule,
             "scheduled_tokens": total_num_scheduled_tokens,
             "chunk_sizes": chunk_sizes,
             "computed_tokens": num_computed_tokens,
             "cached_tokens": num_cached_tokens,
-            "ttft_slo": req_ttft_slo,
-            "remaining_time": remaining_time,
+            "ttft_slo": ttft_slo,
+            "remaining_ttft_slo": remaining_ttft_slo,
             "schedule_ms": f"{schedule_duration * 1000:.3f}",
             "num_waiting": len(self.waiting),
             "num_running": len(self.running),
@@ -1316,13 +1307,11 @@ class Scheduler(SchedulerInterface):
     
     def _finalize_and_log_profiling(self, model_run_duration: float) -> None:
         """完成profiling数据并写入文件"""
-        if self.current_batch_profiling_data is None:
-            return
-        
+
         # 添加model run时间
         self.current_batch_profiling_data["model_run_ms"] = f"{model_run_duration * 1000:.3f}"
         
-        if self.use_rl_scheduler:
+        if self.use_rl_schedule:
             # 写入日志文件
             try:
                 with open(self.profiling_log_file, 'a', encoding='utf-8') as f:
@@ -1330,23 +1319,17 @@ class Scheduler(SchedulerInterface):
             except Exception as e:
                 logger.warning(f"Failed to write profiling data: {e}")
         
-        self.batch_counter += 1
-        self.current_batch_profiling_data = None # 重置
-        self.last_schedule_end_time = None
+        self.batch_id += 1
 
     def _record_rl_scheduler_performance(self,model_run_duration: float) -> None:
-        if not self.current_batch_rl_data:
-            return
+
         self.current_batch_rl_data.update({"model_run_ms":float(f"{model_run_duration*1000:.3f}")})
 
-        if self.use_rl_scheduler:
+        if self.use_rl_schedule:
             # 当使用rl 调度时才更新rl环境信息
             self.update_rl_env_info(True)
             self.rl_scheduler.record_performance(self.rl_env_info)
-            
-    # ==============================
-    # ELRAR Engine Agent helpers
-    # ==============================
+
     def _collect_and_push_engine_state_sync(
         self,
         scheduler_output: SchedulerOutput,
@@ -1421,14 +1404,14 @@ class Scheduler(SchedulerInterface):
         except Exception as e:
             logger.warning(f"ELRAR state collection (async) failed: {e}")
 
-    def update_rl_env_info(self,After: bool=False):
+    def update_rl_env_info(self,after_running: bool=False):
         self.rl_env_info['running_requests'] = self.running
         self.rl_env_info['waiting_requests'] = list(self.waiting)
         self.rl_env_info['now_time'] = time.monotonic()
         self.rl_env_info['max_num_scheduled_tokens'] = self.max_num_scheduled_tokens
         self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
         self.rl_env_info['last_model_run_time'] = self.rl_env_info['model_run_time']
-        if After:
+        if after_running:
             self.rl_env_info['select_token_budget'] = self.rl_data_collection.get_select_token_budget()
             self.rl_env_info['last_token_budget'] = self.rl_data_collection.get_last_token_budget()
             self.rl_env_info['model_run_time'] = self.current_batch_rl_data.get('model_run_ms',0)

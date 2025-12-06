@@ -93,7 +93,7 @@ class Request:
 
 
     def _set_other_attribute(self):
-
+        self.arrival_time = time.monotonic()
         if self.sampling_params.extra_args:
             self.extra_data = self.sampling_params.extra_args.get('extra_data', None)
             if self.extra_data:

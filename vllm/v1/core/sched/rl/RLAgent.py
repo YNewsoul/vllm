@@ -291,7 +291,7 @@ class RLAgent:
             if output_tokens >= 0:
                 # decode请求
                 # 1.当前 TPOT
-                if output_tokens == 0：
+                if output_tokens == 0:
                     tpot_status = 0.0
                 else:
                     tpot_status = np.tanh((50-(now_time - r.ttft)/output_tokens*1000)/50)

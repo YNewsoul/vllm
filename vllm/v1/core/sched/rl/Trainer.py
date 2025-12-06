@@ -76,7 +76,6 @@ class Trainer:
         before_waiting_req = before_env_info.get("waiting_requests",[])
         before_time = before_env_info.get("now_time")
 
-        after_running_req = after_env_info.get("running_requests",[])
         after_time = after_env_info.get("now_time")
         model_run_time = after_env_info.get("model_run_time",0.0)
         select_token_budget = after_env_info.get("select_token_budget", 0)
