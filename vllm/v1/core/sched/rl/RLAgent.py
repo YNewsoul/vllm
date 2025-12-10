@@ -8,6 +8,13 @@ import random
 import time
 import json
 from typing import Dict
+from prometheus_client import start_http_server, Gauge
+
+TRAIN_STEP = Gauge('train_step', 'Training step counter')
+LOSS = Gauge('loss', 'Training loss')
+AVG_TARGET_Q = Gauge('avg_target_q', 'Average target Q value')
+AVG_REWARDS = Gauge('avg_rewards', 'Average rewards')
+
 
 try:
     from .RLConfig import RLSchedulerConfig
@@ -49,18 +56,22 @@ class RLAgent:
         self.log_frequency = self.config.log_frequency
         self.model_save_dir = None
 
+        if self.train_enabled:
+            try:
+                logger.info(f"start prometheus server ...")
+                start_http_server(8768)
+            except Exception as e:
+                logger.error(f"Failed to start prometheus server: {e}")
+        
+        self.tpot_slo = self.config.tpot_slo
+        self.tpot_start = self.config.tpot_start
+
 
     def _initialize_model(self):
         """初始化模型：尝试加载预训练模型或从0训练"""
 
         # 加载初始模型
-        if self.config.rl_model == "MLPNetwork":  
-            self.main_model = MLPNetwork(self.config.state_dim, self.config.action_dim).to(self.device)
-            self.target_model = MLPNetwork(self.config.state_dim, self.config.action_dim).to(self.device)
-            self.state_dim = self.config.state_dim
-            self.action_dim = self.config.action_dim
-            logger.info(f"Initializing model MLPNetwork successfully!")
-        elif self.config.rl_model == "DualAttentionNetwork":
+        if self.config.rl_model == "DualAttentionNetwork":
             
             self.main_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting, 
                                                    self.config.Feature_waiting, self.config.K_running, 
@@ -81,7 +92,7 @@ class RLAgent:
 
                 # 更新模型参数
                 if os.path.exists(model_path):
-                    self.load_model(self.main_model, model_path)
+                    self.load_model(model_path)
                     self.target_model.load_state_dict(self.main_model.state_dict())
 
             except Exception as e:
@@ -122,15 +133,15 @@ class RLAgent:
     def select(self, env_info: Dict):
 
         # === 1. 获取网络输入 ===
-        global_vec, wait_arr, run_arr, wait_mask, run_mask = self.env_info_to_state(env_info)
+        global_vec, wait_arr, run_arr, wait_mask, run_mask, scenario_id = self.env_info_to_state(env_info)
 
         # 转为张量并放到设备
-        global_vec = torch.tensor(global_vec, dtype=torch.float32, device=self.device).unsqueeze(0)  # [1, G]
-        wait_arr = torch.tensor(wait_arr, dtype=torch.float32, device=self.device).unsqueeze(0)      # [1, K_wait, F_wait]
-        run_arr = torch.tensor(run_arr, dtype=torch.float32, device=self.device).unsqueeze(0)        # [1, K_run, F_run]
-        wait_mask = torch.tensor(wait_mask, dtype=torch.float32, device=self.device).unsqueeze(0)    # [1, K_wait]
-        run_mask = torch.tensor(run_mask, dtype=torch.float32, device=self.device).unsqueeze(0)      # [1, K_run]
-
+        scenario_id = torch.tensor(scenario_id, dtype=torch.long, device=self.device)  # [1]
+        global_vec = torch.from_numpy(global_vec).float().to(self.device).unsqueeze(0)  # [1, G]
+        wait_arr = torch.from_numpy(wait_arr).float().to(self.device).unsqueeze(0)      # [1, K_wait, F_wait]
+        run_arr = torch.from_numpy(run_arr).float().to(self.device).unsqueeze(0)        # [1, K_run, F_run]
+        wait_mask = torch.from_numpy(wait_mask).float().to(self.device).unsqueeze(0)    # [1, K_wait]
+        run_mask = torch.from_numpy(run_mask).float().to(self.device).unsqueeze(0)      # [1, K_run]
 
         # === 2. 进入评估模式（关闭dropout/bn） ===
         self.main_model.eval()
@@ -140,8 +151,8 @@ class RLAgent:
                 self.action = random.choice(self.action_map)
                 return self.action
             
-        with torch.no_grad():
-            q_values = self.main_model(global_vec, wait_arr, run_arr, wait_mask, run_mask).squeeze(0).cpu().numpy()  # [1, action_dim]
+        with torch.inference_mode():
+            q_values = self.main_model(global_vec, wait_arr, run_arr, wait_mask, run_mask, scenario_id).squeeze(0).cpu().numpy()  # [1, action_dim]
             
             best_idx = np.argmax(q_values)
             self.action = self.action_map[best_idx]
@@ -149,12 +160,10 @@ class RLAgent:
             return self.action
 
     def learn(self, batch) -> float:
+        self.main_model.train()
         # 1. 正确处理batch数据
         # 先将batch中的每个元素解包，然后将相同类型的数据收集到一起
-        before_env_infoes = []
-        after_env_infoes = []
-        actions = []
-        rewards = []
+        before_env_infoes,after_env_infoes,actions,rewards = [],[],[],[]
         
         # 1.从 batch 解包
         for experience in batch:
@@ -167,48 +176,56 @@ class RLAgent:
             rewards.append(reward)
 
         # 2.批量转换状态为张量 (global, wait, run)
-        global_befores, wait_befores, run_befores, wait_mask_befores, run_mask_befores = [], [], [], [], []
-        global_afters,  wait_afters,  run_afters,  wait_mask_afters,  run_mask_afters  = [], [], [], [], []
+        global_befores, wait_befores, run_befores, wait_mask_befores, run_mask_befores,scenario_befores  = [], [], [], [], [],[]
+        global_afters,  wait_afters,  run_afters,  wait_mask_afters,  run_mask_afters ,scenario_afters  = [], [], [], [], [],[]
 
         for before_env_info in before_env_infoes:
-            g, w, r, wm, rm = self.env_info_to_state(before_env_info)
+            g, w, r, wm, rm ,sc = self.env_info_to_state(before_env_info)
             global_befores.append(g)
             wait_befores.append(w)
             run_befores.append(r)
             wait_mask_befores.append(wm)
             run_mask_befores.append(rm)
+            scenario_befores.append(sc)
 
         for after_env_info in after_env_infoes:
-            g, w, r, wm, rm = self.env_info_to_state(after_env_info)
+            g, w, r, wm, rm ,sc= self.env_info_to_state(after_env_info)
             global_afters.append(g)
             wait_afters.append(w)
             run_afters.append(r)
             wait_mask_afters.append(wm)
             run_mask_afters.append(rm)
+            scenario_afters.append(sc)
 
         # 3. 转换为 torch.Tensor
         device = self.device
-        globals_before = torch.tensor(np.stack(global_befores), dtype=torch.float32).to(device)
-        waits_before   = torch.tensor(np.stack(wait_befores), dtype=torch.float32).to(device)
-        runs_before    = torch.tensor(np.stack(run_befores), dtype=torch.float32).to(device)
-        wmask_before   = torch.tensor(np.stack(wait_mask_befores), dtype=torch.float32).to(device)
-        rmask_before   = torch.tensor(np.stack(run_mask_befores), dtype=torch.float32).to(device)
+        globals_before = torch.from_numpy(np.stack(global_befores)).float().to(device)
+        waits_before   = torch.from_numpy(np.stack(wait_befores)).float().to(device)
+        runs_before    = torch.from_numpy(np.stack(run_befores)).float().to(device)
+        wmask_before   = torch.from_numpy(np.stack(wait_mask_befores)).float().to(device)
+        rmask_before   = torch.from_numpy(np.stack(run_mask_befores)).float().to(device)
+        scenarios_before = torch.from_numpy(np.array(scenario_befores)).long().to(device).view(-1)
 
-        globals_after  = torch.tensor(np.stack(global_afters), dtype=torch.float32).to(device)
-        waits_after    = torch.tensor(np.stack(wait_afters), dtype=torch.float32).to(device)
-        runs_after     = torch.tensor(np.stack(run_afters), dtype=torch.float32).to(device)
-        wmask_after    = torch.tensor(np.stack(wait_mask_afters), dtype=torch.float32).to(device)
-        rmask_after    = torch.tensor(np.stack(run_mask_afters), dtype=torch.float32).to(device)
+        globals_after  = torch.from_numpy(np.stack(global_afters)).float().to(device)
+        waits_after    = torch.from_numpy(np.stack(wait_afters)).float().to(device)
+        runs_after     = torch.from_numpy(np.stack(run_afters)).float().to(device)
+        wmask_after    = torch.from_numpy(np.stack(wait_mask_afters)).float().to(device)
+        rmask_after    = torch.from_numpy(np.stack(run_mask_afters)).float().to(device)
+        scenarios_after = torch.from_numpy(np.array(scenario_afters)).long().to(device).view(-1)
 
         actions = torch.tensor(actions, dtype=torch.long).unsqueeze(1).to(device)   # [B, 1]
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)   
         
         # 4. 计算预测Q值（主网络）
-        current_q = self.main_model(globals_before, waits_before, runs_before, wmask_before, rmask_before).gather(1, actions).squeeze(1)
+        current_q = self.main_model(
+                globals_before, waits_before, runs_before, wmask_before, rmask_before ,scenarios_before
+            ).gather(1, actions).squeeze(1)
         
         # 5. 计算目标Q值（目标网络）
         with torch.no_grad():
-            next_q_max = self.target_model(globals_after, waits_after, runs_after, wmask_after, rmask_after).max(1)[0]
+            next_q_max = self.target_model(
+                globals_after, waits_after, runs_after, wmask_after, rmask_after ,scenarios_after
+            ).max(1)[0]
             target_q = rewards + self.gamma * next_q_max   # 折扣奖励
         
 
@@ -234,10 +251,16 @@ class RLAgent:
                     "avg_rewards":f"{rewards.mean().detach().item():.5f}"}
             self._write_log_data(log_data)
 
-        now = time.monotonic()
+        now = time.time()
         if now - self.last_save_model_time >= self.config.save_model_frequency:
             self.save_model()
             self.last_save_model_time = now
+            
+        # 更新Prometheus指标
+        TRAIN_STEP.set(self.train_step)
+        LOSS.set(loss.detach().item())
+        AVG_TARGET_Q.set(target_q.mean().detach().item())
+        AVG_REWARDS.set(rewards.mean().detach().item())
         
         return loss.item()
 
@@ -248,7 +271,7 @@ class RLAgent:
         torch.save(self.main_model.state_dict(), save_path)
         logger.info(f"save model successfully, to {save_path}")
     
-    def load_model(self, model: torch.nn.Module, model_path: str) -> bool:
+    def load_model(self,model_path: str) -> bool:
         """从模型文件加载网络参数"""
         try:
             # 加载模型权重
@@ -256,9 +279,9 @@ class RLAgent:
             
             # 检查是否是完整的模型权重或者仅state_dict
             if 'state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['state_dict'])
+                self.main_model.load_state_dict(checkpoint['state_dict'])
             else:
-                model.load_state_dict(checkpoint)
+                self.main_model.load_state_dict(checkpoint)
                 
             logger.info(f"load model successfully,from {model_path} ")
             return True
@@ -270,65 +293,65 @@ class RLAgent:
         now_time = env_info.get("now_time", 0.0)
         running = list(env_info.get("running_requests", []))
         waiting = list(env_info.get("waiting_requests", []))
+        scenario_id = np.array([env_info.get("scenario_id", 0)])
 
         # ---- Global 指标 ----
-        recent_comform_slo_rate = float(env_info.get("recent_comform_slo_rate", 0.0))
-        last_model_run_time = float(env_info.get("last_model_run_time", 0.0))/300
+        recent_comform_slo_rate = np.tanh(float(env_info.get("recent_comform_slo_rate", 0.0)))
+        last_model_run_time = np.tanh(float(env_info.get("last_model_run_time", 0.0))/500.0)
+        last_token_budget = np.tanh(float(env_info.get("last_token_budget", 0.0))/2048.0)
 
         # ---- 全局向量 ----
-        global_vec = np.array([
-            recent_comform_slo_rate,
-            last_model_run_time,
-        ])
+        global_vec = np.array([recent_comform_slo_rate, last_model_run_time, last_token_budget], dtype=np.float32)
 
         # ---- 运行队列 ----
         running_feats, run_mask = [], []
-        waiting_feats, wait_mask = [], []
         remain_prefill_tokens = 0
+
         for r in running[:self.config.K_running]:
             output_tokens = r.num_computed_tokens - r.num_prompt_tokens
-
             if output_tokens >= 0:
                 # decode请求
                 # 1.当前 TPOT
                 if output_tokens == 0:
                     tpot_status = 0.0
                 else:
-                    tpot_status = np.tanh((50-(now_time - r.ttft)/output_tokens*1000)/50)
-                # 2.进度比例 (用于判断是否超过 20% 阈值)
-                progress = np.tanh(output_tokens / r.max_tokens*0.2)
+                    tpot = (now_time - r.ttft)/output_tokens*1000
+                    tpot_status = np.tanh((self.tpot_slo-tpot)/self.tpot_slo)
+                # 2.进度比例
+                tpot_start_tokens = (r.max_tokens*self.tpot_start)
+                progress = np.tanh((output_tokens - tpot_start_tokens) / tpot_start_tokens)
                 running_feats.append([progress, tpot_status,1.0])
             else:
                 remain_prefill_tokens -= output_tokens
                 remaining_prefill  = np.tanh(remain_prefill_tokens/ self.config.prompt_norm)
-                urgency = np.tanh((r.ttft_slo - (now_time - r.arrival_time)) / 50.0)
+                slack_ms = r.ttft_slo - (now_time - r.arrival_time)
+                urgency = np.tanh((slack_ms) / r.ttft_slo)
                 running_feats.append([remaining_prefill,urgency,-1.0])
             run_mask.append(1.0)
         while len(running_feats) < self.config.K_running:
-            running_feats.append([0.0]*3)
+            running_feats.append([0.0,0.0,0.0])
             run_mask.append(0.0)
 
+
+        waiting_feats, wait_mask = [], []
         # ---- 等待队列 top-K ----
         for r in waiting[:self.config.K_waiting]:
-            urgency = np.tanh((r.ttft_slo - (now_time - r.arrival_time)) / 50.0)
             remain_prefill_tokens += r.num_prompt_tokens
             remaining_prefill = np.tanh(remain_prefill_tokens / self.config.prompt_norm)
-            waiting_feats.append([remaining_prefill, urgency,-1])
+            slack_ms = r.ttft_slo - (now_time - r.arrival_time)
+            urgency = np.tanh(slack_ms / r.ttft_slo)
+            waiting_feats.append([remaining_prefill, urgency,-1.0])
             wait_mask.append(1.0)
         while len(waiting_feats) < self.config.K_waiting:
-            waiting_feats.append([0.0]*3)
+            waiting_feats.append([0.0,0.0,0.0])
             wait_mask.append(0.0)
 
         wait_arr = np.array(waiting_feats, dtype=np.float32)
         wait_mask = np.array(wait_mask, dtype=np.float32)
-
         run_arr = np.array(running_feats, dtype=np.float32)
         run_mask = np.array(run_mask, dtype=np.float32)
 
-        return global_vec, wait_arr, run_arr, wait_mask, run_mask
-
-    def _is_decode_phase(self, request) -> bool:
-        return request.num_computed_tokens >= request.num_prompt_tokens
+        return global_vec, wait_arr, run_arr, wait_mask, run_mask, scenario_id
 
     def _write_log_data(self, log_data):
         """写入日志数据"""
@@ -341,43 +364,11 @@ class RLAgent:
     def reset(self):
         self._initialize_log_file()
         self.train_step = 0
-        self.last_save_model_time = time.monotonic()
+        self.last_save_model_time = time.time()
     
     def _write_training_info(self,time_dir):
         """写入训练的配置信息"""
-        training_info = {
-            "agent":{"device":self.config.device,
-                    "rl_model":self.config.rl_model,
-                    "use_pretrained_model":self.config.use_pretrained_model,
-                    "pretrained_model_path":self.config.pretrained_model_path,
-                    "save_model_frequency":self.config.save_model_frequency,
-                    "log_frequency":self.config.log_frequency,
-            },
-            "Trainer":{"train_total_time":self.config.train_total_time,
-                       "train_batch_size":self.config.train_batch_size,
-                       "replay_buffer_size":self.config.replay_buffer_size,
-            },
-            "DQN":{"lr":self.config.lr,
-                   "gamma":self.config.gamma,
-                   "epsilon":self.config.epsilon,
-                   "epsilon_max_step":self.config.epsilon_max_step,
-                   "epsilon_min":self.config.epsilon_min,
-                   "target_net_update_freq":self.config.target_net_update_freq,
-            },
-            "reward":{"lambda_recent_comform_slo":self.config.lambda_recent_comform_slo,
-                      "lambda_decode":self.config.lambda_decode,
-                      "lambda_prefill":self.config.lambda_prefill,
-            },
-            "MLPNetwork":{"state_dim":self.config.state_dim,
-                          "action_dim":self.config.action_dim,
-            },
-            "DualAttentionNetwork":{"Global_state_dim":self.config.Global_state_dim,
-                                     "K_waiting":self.config.K_waiting,
-                                     "Feature_waiting":self.config.Feature_waiting,
-                                     "K_running":self.config.K_running,
-                                     "Feature_running":self.config.Feature_running
-            },
-        }
+        training_info = self.config.to_dict()
         train_info_path = os.path.join(time_dir, "training_info.jsonl")
         with open(train_info_path, "a", encoding="utf-8") as f:
             json.dump(training_info, f, ensure_ascii=False, indent=4)

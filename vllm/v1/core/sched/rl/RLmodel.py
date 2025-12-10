@@ -10,36 +10,6 @@ try:
 except ImportError:
     logger = logging.getLogger(__name__)
 
-class MLPNetwork(nn.Module):
-    """
-    轻量 MLP 网络
-    输入：6维状态；输出：16个离散动作的Q值（评估动作长期价值）
-    """
-    def __init__(self, state_dim: int, action_dim: int):
-        super(MLPNetwork, self).__init__()
-        # 网络结构：2层隐藏层（24+16节点），平衡拟合能力与延迟
-        self.network = nn.Sequential(
-            nn.Linear(state_dim, 24),  # 输入层→隐藏层1
-            nn.ReLU(),                 # 激活函数（计算快，缓解梯度消失）
-            nn.Linear(24, 16),         # 隐藏层1→隐藏层2
-            nn.ReLU(),
-            nn.Linear(16, action_dim)  # 隐藏层2→输出层（16个动作Q值）
-        )
-        # 权重初始化
-        self._init_weights()
-
-    def _init_weights(self) -> None:
-        """初始化权重，确保训练稳定"""
-        for m in self.network.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)  # Xavier初始化（避免梯度爆炸）
-                nn.init.constant_(m.bias, 0.1)     # 偏置初始化（避免初始输出过小）
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not isinstance(x, torch.Tensor):
-            x = torch.tensor(x, dtype=torch.float32)
-        return self.network(x)
-
 class DualAttentionNetwork(nn.Module):
     """
     双注意力网络 (Dual Attention Network) - 专为调度系统设计的深度学习模型
@@ -57,13 +27,9 @@ class DualAttentionNetwork(nn.Module):
         run_arr: [批量大小, 运行队列长度, 运行队列特征维度] - 正在运行的请求信息
         wait_mask: [批量大小, 等待队列长度] (可选) - 标记等待队列中哪些位置是有效的
         run_mask: [批量大小, 运行队列长度] (可选) - 标记运行队列中哪些位置是有效的
-    
-    输出:
-        mode='discrete' -> Q值 [批量大小, 动作维度] - 用于DQN算法，每个动作的价值估计
-        mode='continuous' -> (均值, 对数标准差) - 用于连续动作空间的策略梯度方法
     """
     def __init__(self, G: int, K_wait: int, F_wait: int, K_run: int, F_run: int,
-                 action_dim: int, hidden=256, mode="discrete"):
+                 action_dim: int, hidden=256):
         """
         G: 全局状态维度
         K_wait: 等待队列view长度上限长度
@@ -72,10 +38,8 @@ class DualAttentionNetwork(nn.Module):
         F_run: 运行队列特征维度
         action_dim: 动作维度
         hidden: 隐藏层维度
-        mode: 输出模式（"discrete"或"continuous"）
         """
         super().__init__()
-        self.mode = mode
 
         # 等待队列编码器 - 将每个等待请求的特征转换为64维的向量表示
         # 两层全连接网络，使用ReLU激活函数增加非线性能力
@@ -99,23 +63,26 @@ class DualAttentionNetwork(nn.Module):
         # 运行队列注意力层
         self.run_att = nn.Linear(64, 1)
 
+        # 场景嵌入 + FiLM 调制（两类 RL 场景）
+        self.scenario_embed = nn.Embedding(2, 8)
+        # 生成缩放/偏置，用于调制 wait/run 的池化特征（各 128 维）
+        self.film = nn.Sequential(
+            nn.Linear(8, 64),
+            nn.ReLU(),
+            nn.Linear(64, 512)  # -> gamma(256)+beta(256) -> wait/run 各 128
+        )
+
         # 主网络骨干 - 将所有信息融合并进行高级特征提取
         # 输入是全局状态 + 等待队列池化结果 + 运行队列池化结果
         self.backbone = nn.Sequential(
-            nn.Linear(G + 256, hidden),  # 融合所有特征
+            nn.Linear(G + 256 + 8, hidden),  # 融合所有特征,256 = wait_att+wait_max+run_att+run_max
             nn.ReLU(),
             nn.Linear(hidden, hidden//2),  # 降维处理
             nn.ReLU()
         )
 
-        if self.mode == "discrete":
-            # 离散模式：输出每个动作的Q值
-            self.head = nn.Linear(hidden//2, action_dim)
-        else:
-            # 连续模式：输出均值和对数标准差
-            self.mu = nn.Linear(hidden//2, 2)
-            # 可学习的对数标准差参数
-            self.logstd = nn.Parameter(torch.zeros(2))
+        self.value_head = nn.Linear(hidden // 2, 1)
+        self.adv_head = nn.Linear(hidden // 2, action_dim)
 
         # 初始化权重
         self._init_weights()
@@ -166,7 +133,7 @@ class DualAttentionNetwork(nn.Module):
         return weights
 
     def forward(self, global_vec: torch.Tensor, wait_arr: torch.Tensor, run_arr: torch.Tensor,
-                wait_mask: torch.Tensor = None, run_mask: torch.Tensor = None, return_attn: bool = False):
+                wait_mask: torch.Tensor = None, run_mask: torch.Tensor = None, scenario_id: torch.Tensor = None):
         """
         网络前向传播过程 - 处理输入数据并生成输出
         """
@@ -179,7 +146,17 @@ class DualAttentionNetwork(nn.Module):
         # 定义负无穷，用于 Max Pooling 的掩码处理
         neg_inf = -1e9
 
-        # 1. 处理等待队列信息 (Waiting Queue)
+        # 场景 id（无则默认 0）
+        if scenario_id is None:
+            scenario_id = torch.zeros(B, dtype=torch.long, device=device)
+        
+        scen = self.scenario_embed(scenario_id)  # [B, 8]
+        film_params = self.film(scen)            # [B, 512]
+        gamma, beta = film_params.chunk(2, dim=-1)       # 各 [B, 256]
+        gamma_wait, gamma_run = gamma.chunk(2, dim=-1)   # 各 [B, 128]
+        beta_wait, beta_run = beta.chunk(2, dim=-1)      # 各 [B, 128]
+
+        # 1. 处理等待队列信息
         # 等待队列长度
         Kw = wait_arr.size(1) 
         if Kw > 0:
@@ -245,25 +222,24 @@ class DualAttentionNetwork(nn.Module):
             pooled_run_att = torch.zeros(B, 64, device=device, dtype=dtype)
             pooled_run_max = torch.zeros(B, 64, device=device, dtype=dtype)
             run_weights = torch.zeros(B, 0, device=device, dtype=dtype)
+        
+
+        # FiLM 调制（条件化场景）
+        wait_feat = torch.cat([pooled_wait_att, pooled_wait_max], dim=1)  # [B,128]
+        run_feat = torch.cat([pooled_run_att, pooled_run_max], dim=1)     # [B,128]
+        wait_feat = wait_feat * (1 + gamma_wait) + beta_wait
+        run_feat = run_feat * (1 + gamma_run) + beta_run
 
         # 3. 融合所有信息并生成输出
         gv = global_vec.to(device=device, dtype=dtype)
         
-        # 拼接顺序: [Global, Wait_Attn, Wait_Max, Run_Attn, Run_Max]
-        # 注意: 这里总维度变成了 G + 64 + 64 + 64 + 64 = G + 256
-        x = torch.cat([gv, pooled_wait_att, pooled_wait_max, pooled_run_att, pooled_run_max], dim=1)
+        x = torch.cat([gv, wait_feat, run_feat, scen], dim=1)  # [B, G+256+8]
         
         h = self.backbone(x)
 
-        if self.mode == "discrete":
-            out = self.head(h)
-        else:
-            mu = self.mu(h)
-            logstd = torch.clamp(self.logstd, min=-6.0, max=1.0)
-            logstd = logstd.expand_as(mu)
-            out = (mu, logstd)
+        value = self.value_head(h)                 # [B,1]
+        adv = self.adv_head(h)                     # [B,A]
+        adv_mean = adv.mean(dim=1, keepdim=True)
+        out = value + (adv - adv_mean)
 
-        # 是否返回注意力权重（用于分析网络关注的重点）
-        if return_attn:
-            return out, wait_weights, run_weights
         return out

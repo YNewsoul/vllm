@@ -54,7 +54,7 @@ class RLSchedulerConfig:
     lambda_finish: float = 2.0        # finish 奖励权重
 
     # === DualAttentionNetwork 参数 ===
-    Global_state_dim: int = 2          # G: 全局状态维度
+    Global_state_dim: int = 3          # G: 全局状态维度
     K_waiting: int = 5                # 取top-K个等待请求提取特征
     Feature_waiting: int = 3           # 等待队列特征维度
     K_running: int = 10                # 取top-K个运行请求提取特征
@@ -66,9 +66,9 @@ class RLSchedulerConfig:
     # === Trainer 参数 ===
     replay_buffer_size: int = 5000    # 经验回放缓冲区大小
     train_batch_size: int = 64        # 训练批次大小
-    train_total_time: float = 3600.0    # 训练总时间（单位：s）
-
-
+    train_total_time: float = 28800.0    # 训练总时间（单位：s）
+    tpot_slo: float = 50.0             # TPOT SLO
+    tpot_start: float = 0.3    # TPOT 计算开始比例
 
     @classmethod
     def from_env(cls) -> 'RLSchedulerConfig':
@@ -115,7 +115,7 @@ class RLSchedulerConfig:
             lambda_finish=float(os.getenv('VLLM_RL_LAMBDA_FINISH', '2.0')),
 
             # DualAttentionNetwork 参数
-            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '2')),
+            Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '3')),
             K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '5')),
             Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '3')),
             K_running=int(os.getenv('VLLM_RL_K_RUNNING', '10')),
@@ -127,10 +127,12 @@ class RLSchedulerConfig:
             # Trainer 参数
             replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '5000')),
             train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '64')),
-            train_total_time=float(os.getenv('VLLM_RL_TRAIN_TOTAL_TIME', '3600.0')),
+            train_total_time=float(os.getenv('VLLM_RL_TRAIN_TOTAL_TIME', '28800.0')),
+            tpot_slo=float(os.getenv('VLLM_RL_TPOT_SLO', '50.0')),
+            tpot_start=float(os.getenv('VLLM_RL_TPOT_START', '0.3')),
         )
         return config
 
-    def to_dict(self):
+    def to_dict(self)  -> dict:
         """将配置转换为字典形式"""
         return asdict(self)

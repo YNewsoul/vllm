@@ -29,6 +29,9 @@ class Trainer:
         self.is_training = False
         self.train_lock = threading.Lock()
 
+        self.tpot_slo = self.config.tpot_slo
+        self.tpot_compute_start = self.config.tpot_compute_start
+
     def _train_in_thread(self):
         """在单独线程中执行模型训练"""
         try:
@@ -36,16 +39,16 @@ class Trainer:
                 self.is_training = True
                 try:
                     self.rl_agent.reset()
-                    start_time = time.monotonic()
+                    start_time = time.time()
                     while True:
                         batch = self._sample_exp(self.config.train_batch_size)
                         self.rl_agent.learn(batch)
-                        now = time.monotonic()
-                        if now - start_time >= self.config.train_total_time:
+                        now = time.time()
+                        if now - start_time > self.config.train_total_time + 10:
                             break
                     logger.info(f"Finished the training process in {self.config.train_total_time} seconds")
                 except Exception as e:
-                    logger.error(f"Failed to train episode {episode}: {str(e)}")
+                    logger.error(f"Failed to train  {str(e)}")
                 finally:
                     self.is_training = False
         except Exception as e:
@@ -71,59 +74,120 @@ class Trainer:
     def _caculate_reward(self, before_env_info,after_env_info):
         reward = 0.0
 
-        # 获取信息
+        # env 信息
+        before_time = before_env_info.get("now_time")
         before_running_req = before_env_info.get("running_requests",[])
         before_waiting_req = before_env_info.get("waiting_requests",[])
-        before_time = before_env_info.get("now_time")
+        
 
         after_time = after_env_info.get("now_time")
         model_run_time = after_env_info.get("model_run_time",0.0)
         select_token_budget = after_env_info.get("select_token_budget", 0)
 
         # ========== 1 短期奖励 ==========
-        rew_decode = 0
-        rew_prefill = 0
+
+        ttft_scores, tpot_scores = [], []
         total_prompt_count = 0
 
         for req in before_running_req:
             # 运行的请求
             output_tokens = req.num_computed_tokens - req.num_prompt_tokens
             if output_tokens>= 0:
-                # decode 阶段请求
-                # 当超过20%的时候再考虑tpot，因为有可能一开始tpot就超了
-                if output_tokens > req.max_tokens*0.2:
-                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000
-                    if tpot <= 50:
-                        rew_decode += 1
+                # decode 阶段
+                if output_tokens > req.max_tokens*self.tpot_compute_start:
+                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
+                    if tpot <= self.tpot_slo:
+                        tpot_scores.append(1.0)
                     else:
-                        rew_decode += np.tanh((50-tpot)/50)
+                        tpot_scores.append(np.tanh((self.tpot_slo-tpot)/self.tpot_slo))
             else:
-                # prefill 请求
+                # prefill 阶段
                 total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens
-                ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000
-                if ttft_remaining_time <= (req.ttft_slo-(before_time-req.arrival_time)):
-                    rew_prefill += 1
+                ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000.0
+                slack_ms = req.ttft_slo - (before_time-req.arrival_time)
+                if ttft_remaining_time <= slack_ms:
+                    ttft_scores.append(1.0)
                 else:
-                    rew_prefill -=  np.tanh((ttft_remaining_time + before_time-req.arrival_time -req.ttft_slo)/req.ttft_slo)
+                    ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
                 
         for req in before_waiting_req:
             # 等待的请求
             total_prompt_count += req.num_prompt_tokens
             ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000
-            if ttft_remaining_time <= (req.ttft_slo-(before_time-req.arrival_time)):
-                rew_prefill += 1
+            slack_ms = req.ttft_slo - (before_time-req.arrival_time)
+            if ttft_remaining_time <= slack_ms:
+                ttft_scores.append(1.0)
             else:
-                rew_prefill -=  np.tanh((ttft_remaining_time + before_time-req.arrival_time -req.ttft_slo)/req.ttft_slo)
+                ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
 
-        rew_decode /= (len(before_running_req)-1)
-        rew_prefill = rew_prefill/(1 + len(before_waiting_req))
+        rew_decode = np.mean(tpot_scores) if tpot_scores else 0.0
+        rew_prefill = np.mean(ttft_scores) if ttft_scores else 0.0
 
         # 正向奖励
-        rew_token_budget = select_token_budget/2048
+        rew_budget = select_token_budget/2048.0
 
         # ---------- 综合 ----------
-        reward = (self.config.lambda_decode * float(f"{rew_decode:.3f}")) + \
-                (self.config.lambda_prefill * float(f"{rew_prefill:.3f}")) + \
-                rew_token_budget
+        reward = (self.config.lambda_decode * rew_decode) + \
+                (self.config.lambda_prefill * rew_prefill) + \
+                rew_budget*0.5
+
+        return reward
+    
+    def _caculate_reward_v2(self, before_env_info,after_env_info):
+        reward = 0.0
+
+        # env 信息
+        before_time = before_env_info.get("now_time")
+        before_running_req = before_env_info.get("running_requests",[])
+        before_waiting_req = before_env_info.get("waiting_requests",[])
+        
+
+        after_time = after_env_info.get("now_time")
+        model_run_time = after_env_info.get("model_run_time",0.0)
+        select_token_budget = after_env_info.get("select_token_budget", 0)
+
+        # ========== 1 短期奖励 ==========
+
+        ttft_scores, tpot_scores = [], []
+        total_prompt_count = 0
+
+        for req in before_running_req:
+            # 运行的请求
+            output_tokens = req.num_computed_tokens - req.num_prompt_tokens
+            if output_tokens>= 0:
+                # decode 阶段
+                if output_tokens > req.max_tokens*self.tpot_compute_start:
+                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
+                    tpot_scores.append(np.tanh((self.tpot_slo-tpot)/self.tpot_slo))
+            else:
+                # prefill 阶段
+                total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens
+                ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000.0
+                slack_ms = req.ttft_slo - (before_time-req.arrival_time)
+                if ttft_remaining_time <= slack_ms:
+                    ttft_scores.append(1.0)
+                else:
+                    ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
+                
+        for req in before_waiting_req:
+            # 等待的请求
+            total_prompt_count += req.num_prompt_tokens
+            ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000
+            slack_ms = req.ttft_slo - (before_time-req.arrival_time)
+            if ttft_remaining_time <= slack_ms:
+                ttft_scores.append(1.0)
+            else:
+                ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
+
+        rew_decode = np.mean(tpot_scores) if tpot_scores else 0.0
+        rew_prefill = np.mean(ttft_scores) if ttft_scores else 0.0
+
+        # 正向奖励
+        rew_budget = select_token_budget/2048.0
+
+        # ---------- 综合 ----------
+        reward = (self.config.lambda_decode * rew_decode) + \
+                (self.config.lambda_prefill * rew_prefill) + \
+                rew_budget*0.5
 
         return reward

@@ -99,6 +99,7 @@ class Request:
             if self.extra_data:
                 self.arrival_time = self.extra_data.get('arrival_time', None)
                 self.ttft_slo = self.extra_data.get('ttft_slo', None)
+                self.request_data_id = self.extra_data.get('request_data_id', None)
         self.ttft = None
 
     @classmethod

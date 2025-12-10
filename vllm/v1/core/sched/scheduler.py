@@ -258,7 +258,7 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
-        schedule_start_time = time.monotonic() # Profiling: 记录调度开始时间
+        schedule_start_time = time.time() # Profiling: 记录调度开始时间
 
         scheduled_new_reqs: list[Request] = [] # 新调度的请求
         scheduled_resumed_reqs: list[Request] = [] # 恢复的请求（从抢占状态）
@@ -739,7 +739,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids = set()
 
         # Profiling: 记录调度统计信息，但不立即写入文件（等待model run完成）
-        schedule_end_time = time.monotonic()
+        schedule_end_time = time.time()
         self.last_schedule_end_time = schedule_end_time
         if self.enable_profiling :
             select_token_budget = 0
@@ -883,7 +883,7 @@ class Scheduler(SchedulerInterface):
     ) -> dict[int, EngineCoreOutputs]:
         """处理LLM运行一个iteration后的数据"""
         
-        model_run_duration = time.monotonic() - self.last_schedule_end_time
+        model_run_duration = time.time() - self.last_schedule_end_time
             
         # Profiling数据记录
         if self.enable_profiling:
@@ -916,7 +916,7 @@ class Scheduler(SchedulerInterface):
             
             # 记录 ttft 时间
             if request.ttft is None and num_tokens_scheduled == 1:
-                request.ttft = time.monotonic() - request.arrival_time
+                request.ttft = time.time() - request.arrival_time -model_run_duration
 
             # 获取请求在模型输出中的索引位置
             req_index = model_runner_output.req_id_to_index[req_id]
@@ -1107,7 +1107,7 @@ class Scheduler(SchedulerInterface):
             if request.status == RequestStatus.RUNNING:
                 
                 if self.rl_scheduler:
-                    now = time.monotonic()
+                    now = time.time()
                     comform_slo = False
                     output_tokens = request.num_computed_tokens - request.num_prompt_tokens
                     if request.ttft < request.ttft_slo and (now - request.ttft)*1000 < 50*output_tokens:
@@ -1273,8 +1273,10 @@ class Scheduler(SchedulerInterface):
         num_cached_tokens = []
         ttft_slo = []
         remaining_ttft_slo = []
+        ttft = []
+        request_data_id = []
         
-        now_time = time.monotonic()
+        now_time = time.time()
         
         # 遍历RUNNING队列，只记录本步被调度的请求，保持队列顺序
         for req in self.running:
@@ -1285,21 +1287,29 @@ class Scheduler(SchedulerInterface):
                 num_computed_tokens.append(req.num_computed_tokens)
                 num_cached_tokens.append(req.num_cached_tokens)
                 if self.rl_scheduler:
+                    
                     ttft_slo.append(req.ttft_slo)
-                    remaining_ttft_slo.append(f"{(req.ttft_slo - (now_time - req.arrival_time)):.3f}")
-        now_time = time.time()
+                    if req.ttft is not None:
+                        ttft.append(f"{req.ttft:.3f}")
+                        remaining_ttft_slo.append("True" if req.ttft<=req.ttft_slo else "False")
+                    else:
+                        ttft.append(req.ttft)
+                        remaining_ttft_slo.append(f"{(req.ttft_slo - (now_time - req.arrival_time)):.3f}")
+                    request_data_id.append(req.request_data_id)
         # 准备统计信息（不包含model run时间）
         self.current_batch_profiling_data = {
             "batch_id": self.batch_id,
-            "timestamp": f"{now_time:.3f}",
-            "select_token_budget": select_token_budget,
-            "rl_schedule":self.use_rl_schedule,
-            "scheduled_tokens": total_num_scheduled_tokens,
+            "time": f"{now_time:.3f}",
+            "select_tokens": select_token_budget,
+            "rl_sched":self.use_rl_schedule,
+            "sched_tokens": total_num_scheduled_tokens,
             "chunk_sizes": chunk_sizes,
             "computed_tokens": num_computed_tokens,
             "cached_tokens": num_cached_tokens,
+            "req_data_id": request_data_id,
+            "ttft": ttft,
             "ttft_slo": ttft_slo,
-            "remaining_ttft_slo": remaining_ttft_slo,
+            "remaining_ttft": remaining_ttft_slo,
             "schedule_ms": f"{schedule_duration * 1000:.3f}",
             "num_waiting": len(self.waiting),
             "num_running": len(self.running),
@@ -1311,7 +1321,7 @@ class Scheduler(SchedulerInterface):
         # 添加model run时间
         self.current_batch_profiling_data["model_run_ms"] = f"{model_run_duration * 1000:.3f}"
         
-        if self.use_rl_schedule:
+        if self.use_rl_schedule or self.rl_scheduler is None:
             # 写入日志文件
             try:
                 with open(self.profiling_log_file, 'a', encoding='utf-8') as f:
@@ -1407,7 +1417,7 @@ class Scheduler(SchedulerInterface):
     def update_rl_env_info(self,after_running: bool=False):
         self.rl_env_info['running_requests'] = self.running
         self.rl_env_info['waiting_requests'] = list(self.waiting)
-        self.rl_env_info['now_time'] = time.monotonic()
+        self.rl_env_info['now_time'] = time.time()
         self.rl_env_info['max_num_scheduled_tokens'] = self.max_num_scheduled_tokens
         self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
         self.rl_env_info['last_model_run_time'] = self.rl_env_info['model_run_time']

@@ -29,6 +29,7 @@ class Env:
     def _create_env_snapshot(self, env_info: Dict) -> Dict:
         """创建环境信息的轻量级快照，只复制必要信息"""
         snapshot = {
+            'scenario_id': env_info.get('scenario_id', 0),
             'now_time': env_info['now_time'],
             'recent_comform_slo_rate': env_info.get('recent_comform_slo_rate', 0.0),
             'select_token_budget': env_info.get('select_token_budget', 0.0),
