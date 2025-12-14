@@ -9,7 +9,6 @@ from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 from itertools import chain
-from copy import deepcopy
 # 添加profiling相关的导入
 import json
 import os
@@ -202,8 +201,8 @@ class Scheduler(SchedulerInterface):
 
         self.batch_id = 0 
         self.last_schedule_end_time: Optional[float] = None # 记录调度完成时间，用于计算model run时间
-        self.current_batch_profiling_data: Optional[dict] = None # 当前batch的profiling数据，用于log和SLA调度
-        self.current_batch_rl_data: Optional[dict] = None # 当前batch的用于提供给rl scheduler的数据
+        self.batch_profiling_data: Optional[dict] = None # 当前batch的profiling数据，用于log和SLA调度
+        self.batch_rl_data: Optional[dict] = {} # 当前batch的RL数据，用于log和SLA调度
 
         # RL 环境相关信息
         self.rl_env_info = {
@@ -289,6 +288,8 @@ class Scheduler(SchedulerInterface):
             # RL调度器不可用
             rl_schedule_decision = None
             token_budget = self.max_num_scheduled_tokens
+        
+        init_token_budget = token_budget
         
         # Encoder-related. 编码器相关
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -742,23 +743,12 @@ class Scheduler(SchedulerInterface):
         schedule_end_time = time.time()
         self.last_schedule_end_time = schedule_end_time
         if self.enable_profiling :
-            select_token_budget = 0
-            if rl_schedule_decision:
-                select_token_budget = rl_schedule_decision['token_budget']
             self._prepare_schedule_profiling(
                 schedule_duration=schedule_end_time-schedule_start_time,
                 num_scheduled_tokens=num_scheduled_tokens,
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
-                select_token_budget=select_token_budget
+                token_budget=init_token_budget
             )
-        
-        # 记录 RL 调度器所选的信息
-        if self.rl_scheduler:
-            self.current_batch_rl_data = {
-                "schedule_time":schedule_end_time-schedule_start_time,
-                "num_scheduled_requests":len(num_scheduled_tokens),
-                "total_num_scheduled_tokens":total_num_scheduled_tokens
-            }
 
         return scheduler_output
 
@@ -888,6 +878,9 @@ class Scheduler(SchedulerInterface):
         # Profiling数据记录
         if self.enable_profiling:
             self._finalize_and_log_profiling(model_run_duration)
+        
+        if self.rl_scheduler:
+            self.batch_rl_data["model_run_duration"] = float(f"{model_run_duration*1000:.3f}")
 
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
@@ -1067,8 +1060,10 @@ class Scheduler(SchedulerInterface):
                 self.make_stats(spec_decoding_stats))
 
         # 记录RL调度器性能
-        if self.rl_scheduler:
-            self._record_rl_scheduler_performance(model_run_duration)
+        if self.use_rl_schedule:
+            model_run_ms = float(f"{model_run_duration*1000:.3f}")
+            self.update_rl_env_info(True,model_run_ms)
+            self.rl_scheduler.record_performance(self.rl_env_info)
             
         return engine_core_outputs
 
@@ -1110,7 +1105,7 @@ class Scheduler(SchedulerInterface):
                     now = time.time()
                     comform_slo = False
                     output_tokens = request.num_computed_tokens - request.num_prompt_tokens
-                    if request.ttft < request.ttft_slo and (now - request.ttft)*1000 < 50*output_tokens:
+                    if request.ttft < request.ttft_slo and (now - request.ttft)*1000 <= 50*output_tokens:
                         comform_slo = True
                     self.rl_data_collection.add_rl_finished_req(comform_slo)
                 self.running.remove(request)
@@ -1263,7 +1258,7 @@ class Scheduler(SchedulerInterface):
         schedule_duration:float,
         num_scheduled_tokens: dict[str, int],
         total_num_scheduled_tokens: int,
-        select_token_budget:float
+        token_budget:float
     ) -> None:
         """准备调度profiling信息，但不写入文件（等待model run完成）,记录的是做这一次iteration调度，数据的变化"""
         
@@ -1287,7 +1282,6 @@ class Scheduler(SchedulerInterface):
                 num_computed_tokens.append(req.num_computed_tokens)
                 num_cached_tokens.append(req.num_cached_tokens)
                 if self.rl_scheduler:
-                    
                     ttft_slo.append(req.ttft_slo)
                     if req.ttft is not None:
                         ttft.append(f"{req.ttft:.3f}")
@@ -1297,10 +1291,10 @@ class Scheduler(SchedulerInterface):
                         remaining_ttft_slo.append(f"{(req.ttft_slo - (now_time - req.arrival_time)):.3f}")
                     request_data_id.append(req.request_data_id)
         # 准备统计信息（不包含model run时间）
-        self.current_batch_profiling_data = {
+        self.batch_profiling_data = {
             "batch_id": self.batch_id,
             "time": f"{now_time:.3f}",
-            "select_tokens": select_token_budget,
+            "token_budget": token_budget,
             "rl_sched":self.use_rl_schedule,
             "sched_tokens": total_num_scheduled_tokens,
             "chunk_sizes": chunk_sizes,
@@ -1319,26 +1313,17 @@ class Scheduler(SchedulerInterface):
         """完成profiling数据并写入文件"""
 
         # 添加model run时间
-        self.current_batch_profiling_data["model_run_ms"] = f"{model_run_duration * 1000:.3f}"
+        self.batch_profiling_data["model_run_ms"] = f"{model_run_duration * 1000:.3f}"
         
         if self.use_rl_schedule or self.rl_scheduler is None:
             # 写入日志文件
             try:
                 with open(self.profiling_log_file, 'a', encoding='utf-8') as f:
-                    f.write(json.dumps(self.current_batch_profiling_data, ensure_ascii=False) + '\n')
+                    f.write(json.dumps(self.batch_profiling_data, ensure_ascii=False) + '\n')
             except Exception as e:
                 logger.warning(f"Failed to write profiling data: {e}")
         
         self.batch_id += 1
-
-    def _record_rl_scheduler_performance(self,model_run_duration: float) -> None:
-
-        self.current_batch_rl_data.update({"model_run_ms":float(f"{model_run_duration*1000:.3f}")})
-
-        if self.use_rl_schedule:
-            # 当使用rl 调度时才更新rl环境信息
-            self.update_rl_env_info(True)
-            self.rl_scheduler.record_performance(self.rl_env_info)
 
     def _collect_and_push_engine_state_sync(
         self,
@@ -1414,14 +1399,14 @@ class Scheduler(SchedulerInterface):
         except Exception as e:
             logger.warning(f"ELRAR state collection (async) failed: {e}")
 
-    def update_rl_env_info(self,after_running: bool=False):
+    def update_rl_env_info(self,after_running: bool=False,model_run_ms:float=0.0):
         self.rl_env_info['running_requests'] = self.running
         self.rl_env_info['waiting_requests'] = list(self.waiting)
         self.rl_env_info['now_time'] = time.time()
         self.rl_env_info['max_num_scheduled_tokens'] = self.max_num_scheduled_tokens
         self.rl_env_info['recent_comform_slo_rate'] = self.rl_data_collection.get_comform_slo_ratio()
-        self.rl_env_info['last_model_run_time'] = self.rl_env_info['model_run_time']
+        self.rl_env_info['last_model_run_time'] = self.batch_rl_data.get('model_run_duration',0.0)
+        self.rl_env_info['last_token_budget'] = self.rl_data_collection.get_last_token_budget()
         if after_running:
             self.rl_env_info['select_token_budget'] = self.rl_data_collection.get_select_token_budget()
-            self.rl_env_info['last_token_budget'] = self.rl_data_collection.get_last_token_budget()
-            self.rl_env_info['model_run_time'] = self.current_batch_rl_data.get('model_run_ms',0)
+            self.rl_env_info['model_run_time'] = model_run_ms

@@ -23,36 +23,36 @@ class Trainer:
     def __init__(self,rl_agent:RLAgent):
         self.config = RLSchedulerConfig.from_env()
         self.rl_agent = rl_agent
-        self.rl_replay_buffer = deque(maxlen=self.config.replay_buffer_size)  # 双端队列（自动淘汰旧数据）
+        self.rl_replay_buffer = deque(maxlen=self.config.replay_buffer_size)
 
         # 线程安全相关参数
         self.is_training = False
         self.train_lock = threading.Lock()
 
+        # 训练相关
         self.tpot_slo = self.config.tpot_slo
         self.tpot_start = self.config.tpot_start
+        self.train_batch_size = self.config.train_batch_size
+        self.train_total_time = self.config.train_total_time
+        self.lambda_decode = self.config.lambda_decode
+        self.lambda_prefill = self.config.lambda_prefill
 
     def _train_in_thread(self):
         """在单独线程中执行模型训练"""
         try:
             with self.train_lock:
-                self.is_training = True
-                try:
-                    self.rl_agent.reset()
-                    start_time = time.time()
-                    while True:
-                        batch = self._sample_exp(self.config.train_batch_size)
-                        self.rl_agent.learn(batch)
-                        now = time.time()
-                        if now - start_time > self.config.train_total_time + 10:
-                            break
-                    logger.info(f"Finished the training process in {self.config.train_total_time} seconds")
-                except Exception as e:
-                    logger.error(f"Failed to train  {str(e)}")
-                finally:
-                    self.is_training = False
+                self.rl_agent.reset()
+                start_time = time.time()
+                while True:
+                    batch = self._sample_exp(self.train_batch_size)
+                    self.rl_agent.learn(batch)
+                    if time.time() - start_time > self.train_total_time + 10:
+                        break
+                logger.info(f"Finished the training process in {self.train_total_time} seconds")
         except Exception as e:
-            logger.error(f"Failed to start training thread: {str(e)}")
+            logger.error(f"Failed to train: {str(e)}")
+        finally:
+            self.is_training = False
 
     def add_exp(self, before_env_info,after_env_info,action) :
         """添加经验到回放池（每个经验对应一轮迭代的交互）"""
@@ -60,12 +60,13 @@ class Trainer:
         self.rl_replay_buffer.append((before_env_info, after_env_info, action, reward))
 
         # 当经验池达到阈值且满足训练间隔时，启动异步训练
-        if len(self.rl_replay_buffer) >= self.config.train_batch_size and not self.is_training:
+        if not self.is_training and len(self.rl_replay_buffer) >= self.train_batch_size :
+            self.is_training = True
             logger.info(f"start train ..........")
             # 创建并启动训练线程
             train_thread = threading.Thread(target=self._train_in_thread, daemon=True)
             train_thread.start()
-            logger.info(f"Start the asynchronous training thread and determine the current size of the experience pool: {len(self.rl_replay_buffer)}")
+            logger.info(f"Start the asynchronous training thread and the current size of the experience pool: {len(self.rl_replay_buffer)}")
 
     def _sample_exp(self, batch_size: int):
         """从回放池采样经验（每个经验对应一轮迭代的交互）"""
@@ -79,12 +80,9 @@ class Trainer:
         before_running_req = before_env_info.get("running_requests",[])
         before_waiting_req = before_env_info.get("waiting_requests",[])
         
-
         after_time = after_env_info.get("now_time")
         model_run_time = after_env_info.get("model_run_time",0.0)
         select_token_budget = after_env_info.get("select_token_budget", 0)
-
-        # ========== 1 短期奖励 ==========
 
         ttft_scores, tpot_scores = [], []
         total_prompt_count = 0
@@ -108,7 +106,7 @@ class Trainer:
                 if ttft_remaining_time <= slack_ms:
                     ttft_scores.append(1.0)
                 else:
-                    ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
+                    ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
                 
         for req in before_waiting_req:
             # 等待的请求
@@ -118,17 +116,19 @@ class Trainer:
             if ttft_remaining_time <= slack_ms:
                 ttft_scores.append(1.0)
             else:
-                ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
+                ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
 
         rew_decode = np.mean(tpot_scores) if tpot_scores else 0.0
         rew_prefill = np.mean(ttft_scores) if ttft_scores else 0.0
 
-        # 正向奖励
-        rew_budget = select_token_budget/2048.0
-
+        rew_budget = 0
+        # # 正向奖励
+        # if rew_decode == 0.0 or rew_decode == 1.0:
+        #     rew_budget = select_token_budget/2048.0
+        
         # ---------- 综合 ----------
-        reward = (self.config.lambda_decode * rew_decode) + \
-                (self.config.lambda_prefill * rew_prefill) + \
+        reward = (self.lambda_decode * rew_decode) + \
+                (self.lambda_prefill * rew_prefill) + \
                 rew_budget*0.5
 
         return reward
@@ -140,13 +140,10 @@ class Trainer:
         before_time = before_env_info.get("now_time")
         before_running_req = before_env_info.get("running_requests",[])
         before_waiting_req = before_env_info.get("waiting_requests",[])
-        
 
         after_time = after_env_info.get("now_time")
         model_run_time = after_env_info.get("model_run_time",0.0)
         select_token_budget = after_env_info.get("select_token_budget", 0)
-
-        # ========== 1 短期奖励 ==========
 
         ttft_scores, tpot_scores = [], []
         total_prompt_count = 0
@@ -186,8 +183,8 @@ class Trainer:
         rew_budget = select_token_budget/2048.0
 
         # ---------- 综合 ----------
-        reward = (self.config.lambda_decode * rew_decode) + \
-                (self.config.lambda_prefill * rew_prefill) + \
+        reward = (self.lambda_decode * rew_decode) + \
+                (self.lambda_prefill * rew_prefill) + \
                 rew_budget*0.5
 
         return reward

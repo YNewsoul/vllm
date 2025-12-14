@@ -19,7 +19,7 @@ class RLDataCollection:
 
         # token_budget 相关
         self.select_token_budget = 0.0
-        self.last_token_budget = 0.0
+        self.last_token_budget = self.config.max_num_scheduled_tokens
         
     def add_rl_finished_req(self,comform_slo:bool):
         if comform_slo:

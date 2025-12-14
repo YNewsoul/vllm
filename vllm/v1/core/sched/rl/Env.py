@@ -34,6 +34,7 @@ class Env:
             'recent_comform_slo_rate': env_info.get('recent_comform_slo_rate', 0.0),
             'select_token_budget': env_info.get('select_token_budget', 0.0),
             'last_model_run_time': env_info.get('last_model_run_time', 0.0),
+            'last_token_budget': env_info.get('last_token_budget', 0.0),
             'model_run_time': env_info.get('model_run_time', 0.0),
             # 仅创建请求的轻量级快照
             'running_requests': [

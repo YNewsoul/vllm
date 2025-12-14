@@ -37,77 +37,85 @@ class RLAgent:
     def __init__(self,):
 
         self.config = RLSchedulerConfig.from_env()
-        self.device = torch.device(self.config.device)
 
-        # 是否进行训练
-        self.train_enabled = self.config.train_enabled
-
-        # 初始化模型
+        self._initialize_config()
         self._initialize_model()
 
-        # 训练组件（适配轻量网络）
-        self.optimizer = optim.Adam(self.main_model.parameters(), lr=self.config.lr)  # 低学习率，稳定更新
+        # 其他参数
+        self.optimizer = optim.Adam(self.main_model.parameters(), lr=self.lr)  # 低学习率，稳定更新
         self.criterion = torch.nn.MSELoss()  # 均方误差损失（拟合Q值）
         self.train_step = 0    # 训练步数计数器
-
         self.action_map = [256,512,1024,2048]
-
         self.last_save_model_time = 0
-        self.log_frequency = self.config.log_frequency
-        self.model_save_dir = None
 
         if self.train_enabled:
-            try:
-                logger.info(f"start prometheus server ...")
-                start_http_server(8768)
-            except Exception as e:
-                logger.error(f"Failed to start prometheus server: {e}")
-        
+            start_http_server(8768)
+            self._initialize_log_file()
+
+    def _initialize_config(self):
+        """初始化配置"""
+
+        # 整体参数
+        self.device = torch.device(self.config.device)
+        self.train_enabled = self.config.train_enabled
+        self.rl_model = self.config.rl_model
+        self.use_pretrained_model = self.config.use_pretrained_model
+        self.pretrained_model_path = self.config.pretrained_model_path
+        self.model_save_frequency = self.config.model_save_frequency
+        self.log_frequency = self.config.log_frequency
+        self.action_dim = self.config.action_dim
         self.tpot_slo = self.config.tpot_slo
         self.tpot_start = self.config.tpot_start
 
-
-    def _initialize_model(self):
-        """初始化模型：尝试加载预训练模型或从0训练"""
-
-        # 加载初始模型
-        if self.config.rl_model == "DualAttentionNetwork":
-            
-            self.main_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting, 
-                                                   self.config.Feature_waiting, self.config.K_running, 
-                                                   self.config.Feature_running, self.config.action_dim).to(self.device)
-            self.target_model = DualAttentionNetwork(self.config.Global_state_dim, self.config.K_waiting,
-                                                    self.config.Feature_waiting, self.config.K_running, 
-                                                    self.config.Feature_running, self.config.action_dim).to(self.device)
-            logger.info(f"Initializing model DualAttentionNetwork successfully!")
-        else:
-            raise ValueError(f"Unsupported rl_model: {self.config.rl_model}")
-        
-        # 尝试加载预训练模型参数
-        if self.config.use_pretrained_model and self.config.pretrained_model_path:
-            try:
-                # 获取当前代码文件所在目录
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                model_path = os.path.join(current_dir, self.config.pretrained_model_path)
-
-                # 更新模型参数
-                if os.path.exists(model_path):
-                    self.load_model(model_path)
-                    self.target_model.load_state_dict(self.main_model.state_dict())
-
-            except Exception as e:
-                logger.error(f"Failed to load pretrained model: {e}")
-
+        # DQN 参数
         self.lr = self.config.lr
-
-        # DQN超参数（对齐文档约束）
         self.gamma = self.config.gamma                                    # 折扣因子（长期奖励权重）
         self.epsilon = self.config.epsilon                                # 初始探索概率
         self.epsilon_max_step = self.config.epsilon_max_step              # 最大探索步数
         self.epsilon_min = self.config.epsilon_min                        # 最小探索概率（保留少量试错）
         self.target_net_update_freq = self.config.target_net_update_freq  # 目标网络更新频率
-        
-        self._update_count = 1  
+
+        # DualAttentionNetwork 参数
+        self.Global_state_dim = self.config.Global_state_dim
+        self.K_waiting = self.config.K_waiting
+        self.Feature_waiting = self.config.Feature_waiting
+        self.K_running = self.config.K_running
+        self.Feature_running = self.config.Feature_running
+
+        # === env_to_state 参数 ===
+        self.prompt_norm = self.config.prompt_norm              # 提示归一化因子
+
+    def _initialize_model(self):
+        """初始化模型：尝试加载预训练模型或从0训练"""
+
+        # 加载初始模型
+        if self.rl_model == "DualAttentionNetwork":
+            
+            self.main_model = DualAttentionNetwork(self.Global_state_dim, self.K_waiting, 
+                                                   self.Feature_waiting, self.K_running, 
+                                                   self.Feature_running, self.action_dim).to(self.device)
+            self.target_model = DualAttentionNetwork(self.Global_state_dim, self.K_waiting, 
+                                                   self.Feature_waiting, self.K_running, 
+                                                   self.Feature_running, self.action_dim).to(self.device)
+            logger.info(f"Initializing model DualAttentionNetwork successfully!")
+
+        # 尝试加载预训练模型参数
+        if self.use_pretrained_model and self.pretrained_model_path:
+            try:
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                model_path = os.path.join(current_dir, self.pretrained_model_path)
+
+                if os.path.exists(model_path):
+                    checkpoint = torch.load(model_path, map_location=self.device)
+                    # 检查是否是完整的模型权重或者仅state_dict
+                    if 'state_dict' in checkpoint:
+                        self.main_model.load_state_dict(checkpoint['state_dict'])
+                    else:
+                        self.main_model.load_state_dict(checkpoint)
+                    self.target_model.load_state_dict(self.main_model.state_dict())
+                    logger.info(f"load model successfully,from {model_path} ")
+            except Exception as e:
+                logger.error(f"Failed to load pretrained model: {e}")
 
     def _initialize_log_file(self):
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -252,7 +260,7 @@ class RLAgent:
             self._write_log_data(log_data)
 
         now = time.time()
-        if now - self.last_save_model_time >= self.config.save_model_frequency:
+        if now - self.last_save_model_time >= self.model_save_frequency:
             self.save_model()
             self.last_save_model_time = now
             
@@ -271,28 +279,10 @@ class RLAgent:
         torch.save(self.main_model.state_dict(), save_path)
         logger.info(f"save model successfully, to {save_path}")
     
-    def load_model(self,model_path: str) -> bool:
-        """从模型文件加载网络参数"""
-        try:
-            # 加载模型权重
-            checkpoint = torch.load(model_path, map_location=self.device)
-            
-            # 检查是否是完整的模型权重或者仅state_dict
-            if 'state_dict' in checkpoint:
-                self.main_model.load_state_dict(checkpoint['state_dict'])
-            else:
-                self.main_model.load_state_dict(checkpoint)
-                
-            logger.info(f"load model successfully,from {model_path} ")
-            return True
-        except Exception as e:
-            logger.error(f"load model failed,from {model_path}, error: {e}")
-            return False
-
     def env_info_to_state(self, env_info: Dict):
         now_time = env_info.get("now_time", 0.0)
-        running = list(env_info.get("running_requests", []))
-        waiting = list(env_info.get("waiting_requests", []))
+        running = env_info.get("running_requests", [])
+        waiting = env_info.get("waiting_requests", [])
         scenario_id = np.array([env_info.get("scenario_id", 0)])
 
         # ---- Global 指标 ----
@@ -307,7 +297,7 @@ class RLAgent:
         running_feats, run_mask = [], []
         remain_prefill_tokens = 0
 
-        for r in running[:self.config.K_running]:
+        for r in running[:self.K_running]:
             output_tokens = r.num_computed_tokens - r.num_prompt_tokens
             if output_tokens >= 0:
                 # decode请求
@@ -323,26 +313,26 @@ class RLAgent:
                 running_feats.append([progress, tpot_status,1.0])
             else:
                 remain_prefill_tokens -= output_tokens
-                remaining_prefill  = np.tanh(remain_prefill_tokens/ self.config.prompt_norm)
+                remaining_prefill  = np.tanh(remain_prefill_tokens/ self.prompt_norm)
                 slack_ms = r.ttft_slo - (now_time - r.arrival_time)
                 urgency = np.tanh((slack_ms) / r.ttft_slo)
                 running_feats.append([remaining_prefill,urgency,-1.0])
             run_mask.append(1.0)
-        while len(running_feats) < self.config.K_running:
+        while len(running_feats) < self.K_running:
             running_feats.append([0.0,0.0,0.0])
             run_mask.append(0.0)
 
 
         waiting_feats, wait_mask = [], []
         # ---- 等待队列 top-K ----
-        for r in waiting[:self.config.K_waiting]:
+        for r in waiting[:self.K_waiting]:
             remain_prefill_tokens += r.num_prompt_tokens
-            remaining_prefill = np.tanh(remain_prefill_tokens / self.config.prompt_norm)
+            remaining_prefill = np.tanh(remain_prefill_tokens / self.prompt_norm)
             slack_ms = r.ttft_slo - (now_time - r.arrival_time)
             urgency = np.tanh(slack_ms / r.ttft_slo)
             waiting_feats.append([remaining_prefill, urgency,-1.0])
             wait_mask.append(1.0)
-        while len(waiting_feats) < self.config.K_waiting:
+        while len(waiting_feats) < self.K_waiting:
             waiting_feats.append([0.0,0.0,0.0])
             wait_mask.append(0.0)
 
@@ -362,7 +352,6 @@ class RLAgent:
             logger.warning(f"Failed to write the training log data: {e}")
         
     def reset(self):
-        self._initialize_log_file()
         self.train_step = 0
         self.last_save_model_time = time.time()
     

@@ -44,20 +44,19 @@ class RLScheduler:
     def compute_schedule_decision(self,env_info:Dict):
         """计算 RL 调度决策 """
         
-        # Phase 1:从 RLAgent中选择 token_budget
-        start_rl_schedule_time = time.time()
+        # start_rl_schedule_time = time.time()
         token_budget = env_info["max_num_scheduled_tokens"]
-        schedule_judge = self._RL_schedule_judge(env_info)
+        schedule_judge = self._schedule_judge(env_info)
         use_rl_schedule = False
         if schedule_judge is not None:
             env_info["scenario_id"] = schedule_judge
             self.env.set_before_env_info(env_info)
-            token_budget = self.rl_agent.select(env_info)
+            token_budget = self.rl_agent.select(self.env.get_before_env_info())
             use_rl_schedule = True
        
-        time_rl_agent_select = (time.time() - start_rl_schedule_time)*1000
-        if time_rl_agent_select>=3 :
-            self._write_timeout_info(use_rl_schedule,time_rl_agent_select)
+        # time_rl_agent_select = (time.time() - start_rl_schedule_time)*1000
+        # if time_rl_agent_select>=3 :
+        #     self._write_timeout_info(use_rl_schedule,time_rl_agent_select)
 
         return {
             'token_budget': token_budget,
@@ -65,7 +64,6 @@ class RLScheduler:
         }
 
     def get_simple_status(self) -> Dict[str, Any]:
-        """获取简化的状态信息，用于快速监控"""
         return {
             'train':self.rl_agent.train_enabled,
         }
@@ -77,8 +75,6 @@ class RLScheduler:
             self.env.set_after_env_info(env_info)
             before_env_info, after_env_info = self.env.get_env_info()
             self.trainer.add_exp(before_env_info, after_env_info, self.rl_agent.action)
-            
-        # self.stats['total_performance_records'] += 1
 
     def _write_timeout_info(self,use_rl_schedule,time_rl_agent_select):
         
@@ -95,7 +91,7 @@ class RLScheduler:
         except Exception as e:
             logger.warning(f"Failed to write timeout info : {e}")
 
-    def _RL_schedule_judge(self,env_info):
+    def _schedule_judge(self,env_info):
         running = env_info['running_requests']
         waiting = env_info['waiting_requests']
         num_running = len(running)
