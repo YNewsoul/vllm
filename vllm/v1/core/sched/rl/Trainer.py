@@ -30,7 +30,7 @@ class Trainer:
         self.train_lock = threading.Lock()
 
         self.tpot_slo = self.config.tpot_slo
-        self.tpot_compute_start = self.config.tpot_compute_start
+        self.tpot_start = self.config.tpot_start
 
     def _train_in_thread(self):
         """在单独线程中执行模型训练"""
@@ -94,7 +94,7 @@ class Trainer:
             output_tokens = req.num_computed_tokens - req.num_prompt_tokens
             if output_tokens>= 0:
                 # decode 阶段
-                if output_tokens > req.max_tokens*self.tpot_compute_start:
+                if output_tokens > req.max_tokens*self.tpot_start:
                     tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
                     if tpot <= self.tpot_slo:
                         tpot_scores.append(1.0)
@@ -156,7 +156,7 @@ class Trainer:
             output_tokens = req.num_computed_tokens - req.num_prompt_tokens
             if output_tokens>= 0:
                 # decode 阶段
-                if output_tokens > req.max_tokens*self.tpot_compute_start:
+                if output_tokens > req.max_tokens*self.tpot_start:
                     tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
                     tpot_scores.append(np.tanh((self.tpot_slo-tpot)/self.tpot_slo))
             else:

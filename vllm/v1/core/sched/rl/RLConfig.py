@@ -73,13 +73,9 @@ class RLSchedulerConfig:
     @classmethod
     def from_env(cls) -> 'RLSchedulerConfig':
         config = cls(
-            # 通用
-            verbose_logging=os.getenv('VLLM_RL_VERBOSE_LOGGING', 'false').lower() == 'true',
- 
+
             # RLUtils 参数
             rl_finished_reqs_buffer_size=int(os.getenv('VLLM_RL_FINISHED_REQS_BUFFER_SIZE', '10')),
-            throughput_buffer_size=int(os.getenv('VLLM_RL_THROUGHPUT_BUFFER_SIZE', '100')),
-            latency_buffer_size=int(os.getenv('VLLM_RL_LATENCY_BUFFER_SIZE', '100')),
 
             # agent 参数
             device=os.getenv('VLLM_RL_DEVICE', 'cpu').lower(),
@@ -98,8 +94,6 @@ class RLSchedulerConfig:
             epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.1')),
             target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '200')),
 
-            # MLPNetwork 参数
-            state_dim=int(os.getenv('VLLM_RL_STATE_DIM', '4')),
             action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '4')),
 
             # env 参数

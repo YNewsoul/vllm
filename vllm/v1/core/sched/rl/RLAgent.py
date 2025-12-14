@@ -18,10 +18,10 @@ AVG_REWARDS = Gauge('avg_rewards', 'Average rewards')
 
 try:
     from .RLConfig import RLSchedulerConfig
-    from .RLmodel import MLPNetwork, DualAttentionNetwork
+    from .RLmodel import  DualAttentionNetwork
 except ImportError:
     from RLConfig import RLSchedulerConfig
-    from RLmodel import MLPNetwork, DualAttentionNetwork
+    from RLmodel import  DualAttentionNetwork
 
 try:
     from vllm.logger import init_logger
