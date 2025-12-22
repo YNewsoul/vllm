@@ -25,7 +25,7 @@ class RLSchedulerConfig:
     pretrained_model_path: str = ""      # 预训练模型路径
     model_save_frequency: float = 300.0  # 保存模型频率（单位：秒）
     log_frequency: int = 40              # 日志记录频率（单位：step）
-    action_dim: int = 4                # 动作维度（根据环境定义）
+    action_dim: int = 6                # 动作维度（根据环境定义）
 
     # ==== 2.2 DQN 参数 ====
     lr: float = 1e-4                   # 学习率
@@ -33,7 +33,7 @@ class RLSchedulerConfig:
     epsilon: float = 0.2               # 初始探索概率
     epsilon_max_step: int = 100000       # 最大探索步数
     epsilon_min: float = 0.05          # 最小探索概率
-    target_net_update_freq: int = 200  # 目标网络更新频率（单位：step）
+    target_net_update_freq: int = 400  # 目标网络更新频率（单位：step）
 
     # ==== 2.3 DualAttentionNetwork 参数 ====
     Global_state_dim: int = 3          # G: 全局状态维度
@@ -44,10 +44,12 @@ class RLSchedulerConfig:
 
     # ==== 2.4 env_to_state 参数 ====
     prompt_norm: float = 30000.0      # 提示归一化因子
+    model_time_norm: float = 500.0    # 模型运行时间归一化因子
+    token_budget_norm: float = 2048.0 # 令牌预算归一化因子
 
     # === 3 Trainer 参数 ========================
     # ==== 3.1 常规参数 ====
-    replay_buffer_size: int = 5000    # 经验回放缓冲区大小
+    replay_buffer_size: int = 30000    # 经验回放缓冲区大小
     train_batch_size: int = 64        # 训练批次大小
     train_total_time: float = 28800.0 # 训练总时间（单位：s）
     tpot_slo: float = 50.0            # TPOT SLO
@@ -56,6 +58,7 @@ class RLSchedulerConfig:
     # ==== 3.2 Reward 函数参数 ====
     lambda_decode: float = 1.0         # decode 奖励权重
     lambda_prefill: float = 1.0        # prefill 奖励权重
+    lambda_budget: float = 0.5        # budget 奖励权重
 
     @classmethod
     def from_env(cls) -> 'RLSchedulerConfig':
@@ -74,7 +77,7 @@ class RLSchedulerConfig:
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
             model_save_frequency=float(os.getenv('VLLM_RL_MODEL_SAVE_FREQUENCY', '300.0')),
             log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '40')),
-            action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '4')),
+            action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '6')),
 
             ## ==== 2.2 DQN 参数 ====
             lr=float(os.getenv('VLLM_RL_LR', '1e-4')),
@@ -82,7 +85,7 @@ class RLSchedulerConfig:
             epsilon=float(os.getenv('VLLM_RL_EPSILON', '0.2')),
             epsilon_max_step=int(os.getenv('VLLM_RL_EPSILON_MAX_STEP', '100000')),
             epsilon_min=float(os.getenv('VLLM_RL_EPSILON_MIN', '0.1')),
-            target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '200')),
+            target_net_update_freq=int(os.getenv('VLLM_RL_TARGET_NET_UPDATE_FREQ', '400')),
 
             ## ==== 2.3 DualAttentionNetwork 参数 ====
             Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '3')),
@@ -93,18 +96,21 @@ class RLSchedulerConfig:
 
             ## ==== 2.4 env_to_state 参数 ====
             prompt_norm=float(os.getenv('VLLM_RL_PROMPT_NORM', '30000.0')),
+            model_time_norm=float(os.getenv('VLLM_RL_MODEL_TIME_NORM', '500.0')),
+            token_budget_norm=float(os.getenv('VLLM_RL_TOKEN_BUDGET_NORM', '2048.0')),
 
             # 3 Trainer 参数
             ## ==== 3.1 常规参数 ====
-            replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '5000')),
+            replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '30000')),
             train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '64')),
             train_total_time=float(os.getenv('VLLM_RL_TRAIN_TOTAL_TIME', '28800.0')),
             tpot_slo=float(os.getenv('VLLM_RL_TPOT_SLO', '50.0')),
             tpot_start=float(os.getenv('VLLM_RL_TPOT_START', '0.3')),
 
             ## ==== 3.2 Reward 函数参数 ====
-            lambda_decode=float(os.getenv('VLLM_RL_LAMBDA_DECODE', '1.0')),
+            lambda_decode=float(os.getenv('VLLM_RL_LAMBDA_DECODE', '1.5')),
             lambda_prefill=float(os.getenv('VLLM_RL_LAMBDA_PREFILL', '1.0')),
+            lambda_budget=float(os.getenv('VLLM_RL_LAMBDA_BUDGET', '0.5')),
         )
         return config
 

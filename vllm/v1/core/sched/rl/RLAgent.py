@@ -45,7 +45,7 @@ class RLAgent:
         self.optimizer = optim.Adam(self.main_model.parameters(), lr=self.lr)  # 低学习率，稳定更新
         self.criterion = torch.nn.MSELoss()  # 均方误差损失（拟合Q值）
         self.train_step = 0    # 训练步数计数器
-        self.action_map = [256,512,1024,2048]
+        self.action_map = [64,128,256,512,1024,2048]
         self.last_save_model_time = 0
 
         if self.train_enabled:
@@ -84,6 +84,8 @@ class RLAgent:
 
         # === env_to_state 参数 ===
         self.prompt_norm = self.config.prompt_norm              # 提示归一化因子
+        self.token_budget_norm = self.config.token_budget_norm
+        self.model_time_norm = self.config.model_time_norm
 
     def _initialize_model(self):
         """初始化模型：尝试加载预训练模型或从0训练"""
@@ -108,7 +110,7 @@ class RLAgent:
                 if os.path.exists(model_path):
                     checkpoint = torch.load(model_path, map_location=self.device)
                     # 检查是否是完整的模型权重或者仅state_dict
-                    if 'state_dict' in checkpoint:
+                    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
                         self.main_model.load_state_dict(checkpoint['state_dict'])
                     else:
                         self.main_model.load_state_dict(checkpoint)
@@ -286,12 +288,15 @@ class RLAgent:
         scenario_id = np.array([env_info.get("scenario_id", 0)])
 
         # ---- Global 指标 ----
-        recent_comform_slo_rate = np.tanh(float(env_info.get("recent_comform_slo_rate", 0.0)))
-        last_model_run_time = np.tanh(float(env_info.get("last_model_run_time", 0.0))/500.0)
-        last_token_budget = np.tanh(float(env_info.get("last_token_budget", 0.0))/2048.0)
+        recent_comform_slo_rate = float(env_info.get("recent_comform_slo_rate", 0.0))
+        last_model_run_time = float(env_info.get("last_model_run_time", 0.0))/self.model_time_norm
+        last_token_budget = float(env_info.get("last_token_budget", 0.0))/self.token_budget_norm
 
         # ---- 全局向量 ----
-        global_vec = np.array([recent_comform_slo_rate, last_model_run_time, last_token_budget], dtype=np.float32)
+        global_vec = np.array([
+            recent_comform_slo_rate, 
+            last_model_run_time, 
+            last_token_budget], dtype=np.float32)
 
         # ---- 运行队列 ----
         running_feats, run_mask = [], []

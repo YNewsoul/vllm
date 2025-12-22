@@ -5,6 +5,14 @@ import time
 import math
 import numpy as np
 from collections import deque
+from prometheus_client import start_http_server, Gauge
+
+REW_DECODE = Gauge('rew_decode', 'reward decode')
+REW_PREFILL = Gauge('rew_prefill', 'reward prefill')
+REWARD = Gauge('reward', 'reward')
+REW_BUDGET = Gauge('rew_budget', 'reward budget')
+
+
 
 try:
     from .RLConfig import RLSchedulerConfig
@@ -36,6 +44,8 @@ class Trainer:
         self.train_total_time = self.config.train_total_time
         self.lambda_decode = self.config.lambda_decode
         self.lambda_prefill = self.config.lambda_prefill
+        self.lambda_budget = self.config.lambda_budget
+        self.token_budget_norm = self.config.token_budget_norm
 
     def _train_in_thread(self):
         """在单独线程中执行模型训练"""
@@ -56,11 +66,12 @@ class Trainer:
 
     def add_exp(self, before_env_info,after_env_info,action) :
         """添加经验到回放池（每个经验对应一轮迭代的交互）"""
-        reward = self._caculate_reward(before_env_info,after_env_info)
+        # reward = self._caculate_reward(before_env_info,after_env_info)
+        reward = self._caculate_reward_v2(before_env_info,after_env_info)
         self.rl_replay_buffer.append((before_env_info, after_env_info, action, reward))
 
         # 当经验池达到阈值且满足训练间隔时，启动异步训练
-        if not self.is_training and len(self.rl_replay_buffer) >= self.train_batch_size :
+        if not self.is_training and len(self.rl_replay_buffer) >= 4*self.train_batch_size :
             self.is_training = True
             logger.info(f"start train ..........")
             # 创建并启动训练线程
@@ -87,6 +98,14 @@ class Trainer:
         ttft_scores, tpot_scores = [], []
         total_prompt_count = 0
 
+        def ttft_score(req,prompt_count):
+            ttft_remaining_time = (math.ceil(prompt_count/select_token_budget))*model_run_time/1000.0
+            slack_ms = req.ttft_slo - (before_time-req.arrival_time)
+            if ttft_remaining_time <= slack_ms:
+                return 1.0
+            else:
+                return np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo)
+
         for req in before_running_req:
             # 运行的请求
             output_tokens = req.num_computed_tokens - req.num_prompt_tokens
@@ -101,35 +120,30 @@ class Trainer:
             else:
                 # prefill 阶段
                 total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens
-                ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000.0
-                slack_ms = req.ttft_slo - (before_time-req.arrival_time)
-                if ttft_remaining_time <= slack_ms:
-                    ttft_scores.append(1.0)
-                else:
-                    ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
+                ttft_scores.append(ttft_score(req,total_prompt_count))
                 
         for req in before_waiting_req:
             # 等待的请求
             total_prompt_count += req.num_prompt_tokens
-            ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000
-            slack_ms = req.ttft_slo - (before_time-req.arrival_time)
-            if ttft_remaining_time <= slack_ms:
-                ttft_scores.append(1.0)
-            else:
-                ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
+            ttft_scores.append(ttft_score(req,total_prompt_count))
 
         rew_decode = np.mean(tpot_scores) if tpot_scores else 0.0
         rew_prefill = np.mean(ttft_scores) if ttft_scores else 0.0
 
         rew_budget = 0
         # # 正向奖励
-        # if rew_decode == 0.0 or rew_decode == 1.0:
-        #     rew_budget = select_token_budget/2048.0
+        if rew_decode == 0.0 or rew_decode == 1.0:
+            rew_budget = select_token_budget/self.token_budget_norm
         
         # ---------- 综合 ----------
         reward = (self.lambda_decode * rew_decode) + \
                 (self.lambda_prefill * rew_prefill) + \
-                rew_budget*0.5
+                (self.lambda_budget * rew_budget)
+        
+        REW_DECODE.set(rew_decode)
+        REW_PREFILL.set(rew_prefill)
+        REWARD.set(reward)
+        REW_BUDGET.set(rew_budget)
 
         return reward
     
@@ -164,7 +178,7 @@ class Trainer:
                 if ttft_remaining_time <= slack_ms:
                     ttft_scores.append(1.0)
                 else:
-                    ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
+                    ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
                 
         for req in before_waiting_req:
             # 等待的请求
@@ -174,17 +188,22 @@ class Trainer:
             if ttft_remaining_time <= slack_ms:
                 ttft_scores.append(1.0)
             else:
-                ttft_scores.append(-np.tanh((ttft_remaining_time - slack_ms)/req.ttft_slo))
+                ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
 
         rew_decode = np.mean(tpot_scores) if tpot_scores else 0.0
         rew_prefill = np.mean(ttft_scores) if ttft_scores else 0.0
 
         # 正向奖励
-        rew_budget = select_token_budget/2048.0
+        rew_budget = select_token_budget/self.token_budget_norm
 
         # ---------- 综合 ----------
         reward = (self.lambda_decode * rew_decode) + \
                 (self.lambda_prefill * rew_prefill) + \
-                rew_budget*0.5
+                (self.lambda_budget * rew_budget)
+        
+        REW_DECODE.set(rew_decode)
+        REW_PREFILL.set(rew_prefill)
+        REWARD.set(reward)
+        REW_BUDGET.set(rew_budget)
 
         return reward

@@ -1,7 +1,8 @@
 
 
 from collections import deque
-from typing import Dict
+
+from vllm.v1.request import Request
 
 try:
     from .RLConfig import RLSchedulerConfig
@@ -42,3 +43,7 @@ class RLDataCollection:
         
     def get_last_token_budget(self):
         return self.last_token_budget
+
+# def reconstruct_waiting_queue(running:list[Request],waiting:list[Request],prefill_ms:float):
+#     for req in running:
+#         if req.num_computed_tokens - req.num_prompt_tokens < 0:
