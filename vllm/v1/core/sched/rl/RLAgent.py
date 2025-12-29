@@ -313,8 +313,9 @@ class RLAgent:
                     tpot = (now_time - r.ttft)/output_tokens*1000
                     tpot_status = np.tanh((self.tpot_slo-tpot)/self.tpot_slo)
                 # 2.进度比例
-                tpot_start_tokens = (r.max_tokens*self.tpot_start)
-                progress = np.tanh((output_tokens - tpot_start_tokens) / tpot_start_tokens)
+                # tpot_start_tokens = (r.max_tokens*self.tpot_start)
+                # progress = np.tanh((output_tokens - tpot_start_tokens) / tpot_start_tokens)
+                progress = output_tokens/r.max_tokens
                 running_feats.append([progress, tpot_status,1.0])
             else:
                 remain_prefill_tokens -= output_tokens

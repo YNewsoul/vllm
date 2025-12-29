@@ -39,7 +39,7 @@ class RLSchedulerConfig:
     Global_state_dim: int = 3          # G: 全局状态维度
     K_waiting: int = 5                # 取top-K个等待请求提取特征
     Feature_waiting: int = 3           # 等待队列特征维度
-    K_running: int = 10                # 取top-K个运行请求提取特征
+    K_running: int = 15                # 取top-K个运行请求提取特征
     Feature_running: int = 3           # 运行队列特征维度
 
     # ==== 2.4 env_to_state 参数 ====
@@ -56,9 +56,20 @@ class RLSchedulerConfig:
     tpot_start: float = 0.3           # TPOT 计算开始比例
 
     # ==== 3.2 Reward 函数参数 ====
-    lambda_decode: float = 1.0         # decode 奖励权重
+    lambda_decode: float = 1.5         # decode 奖励权重
     lambda_prefill: float = 1.0        # prefill 奖励权重
     lambda_budget: float = 0.5        # budget 奖励权重
+    progress_d1: float = 0.3          # progress 奖励权重 d1
+    progress_d2: float = 0.5          # progress 奖励权重 d2
+    progress_d3: float = 0.65         # progress 奖励权重 d3
+    progress_d4: float = 0.7          # progress 奖励权重 d4
+    lambda_progress_d1: float = 0.1    # progress 奖励权重 d1
+    lambda_progress_d2: float = 0.3    # progress 奖励权重 d2
+    lambda_progress_d3: float = 0.5    # progress 奖励权重 d3
+    lambda_progress_d4: float = 1.4    # progress 奖励权重 d4
+    lambda_progress_d5: float = 1.7    # progress 奖励权重 d5
+
+
 
     @classmethod
     def from_env(cls) -> 'RLSchedulerConfig':
@@ -91,7 +102,7 @@ class RLSchedulerConfig:
             Global_state_dim=int(os.getenv('VLLM_RL_GLOBAL_STATE_DIM', '3')),
             K_waiting=int(os.getenv('VLLM_RL_K_WAITING', '5')),
             Feature_waiting=int(os.getenv('VLLM_RL_FEATURE_WAITING', '3')),
-            K_running=int(os.getenv('VLLM_RL_K_RUNNING', '10')),
+            K_running=int(os.getenv('VLLM_RL_K_RUNNING', '15')),
             Feature_running=int(os.getenv('VLLM_RL_FEATURE_RUNNING', '3')),
 
             ## ==== 2.4 env_to_state 参数 ====
@@ -111,6 +122,17 @@ class RLSchedulerConfig:
             lambda_decode=float(os.getenv('VLLM_RL_LAMBDA_DECODE', '1.5')),
             lambda_prefill=float(os.getenv('VLLM_RL_LAMBDA_PREFILL', '1.0')),
             lambda_budget=float(os.getenv('VLLM_RL_LAMBDA_BUDGET', '0.5')),
+
+            progress_d1=float(os.getenv('VLLM_RL_PROGRESS_D1', '0.3')),
+            progress_d2=float(os.getenv('VLLM_RL_PROGRESS_D2', '0.5')),
+            progress_d3=float(os.getenv('VLLM_RL_PROGRESS_D3', '0.65')),
+            progress_d4=float(os.getenv('VLLM_RL_PROGRESS_D4', '0.7')),
+            lambda_progress_d1=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D1', '0.1')),
+            lambda_progress_d2=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D2', '0.3')),
+            lambda_progress_d3=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D3', '0.5')),
+            lambda_progress_d4=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D4', '1.4')),
+            lambda_progress_d5=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D5', '1.7')),
+
         )
         return config
 

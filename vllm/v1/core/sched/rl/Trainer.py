@@ -45,6 +45,17 @@ class Trainer:
         self.lambda_decode = self.config.lambda_decode
         self.lambda_prefill = self.config.lambda_prefill
         self.lambda_budget = self.config.lambda_budget
+        self.progress_d1 = self.config.progress_d1
+        self.progress_d2 = self.config.progress_d2
+        self.progress_d3 = self.config.progress_d3
+        self.progress_d4 = self.config.progress_d4
+        self.lambda_progress_d1 = self.config.lambda_progress_d1
+        self.lambda_progress_d2 = self.config.lambda_progress_d2
+        self.lambda_progress_d3 = self.config.lambda_progress_d3
+        self.lambda_progress_d4 = self.config.lambda_progress_d4
+        self.lambda_progress_d5 = self.config.lambda_progress_d5
+
+        self.model_time_norm = self.config.model_time_norm
         self.token_budget_norm = self.config.token_budget_norm
 
     def _train_in_thread(self):
@@ -67,7 +78,7 @@ class Trainer:
     def add_exp(self, before_env_info,after_env_info,action) :
         """添加经验到回放池（每个经验对应一轮迭代的交互）"""
         # reward = self._caculate_reward(before_env_info,after_env_info)
-        reward = self._caculate_reward_v2(before_env_info,after_env_info)
+        reward = self._caculate_reward_v3(before_env_info,after_env_info)
         self.rl_replay_buffer.append((before_env_info, after_env_info, action, reward))
 
         # 当经验池达到阈值且满足训练间隔时，启动异步训练
@@ -170,6 +181,83 @@ class Trainer:
                 if output_tokens > req.max_tokens*self.tpot_start:
                     tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
                     tpot_scores.append(np.tanh((self.tpot_slo-tpot)/self.tpot_slo))
+            else:
+                # prefill 阶段
+                total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens
+                ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000.0
+                slack_ms = req.ttft_slo - (before_time-req.arrival_time)
+                if ttft_remaining_time <= slack_ms:
+                    ttft_scores.append(1.0)
+                else:
+                    ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
+                
+        for req in before_waiting_req:
+            # 等待的请求
+            total_prompt_count += req.num_prompt_tokens
+            ttft_remaining_time = (math.ceil(total_prompt_count/select_token_budget))*model_run_time/1000
+            slack_ms = req.ttft_slo - (before_time-req.arrival_time)
+            if ttft_remaining_time <= slack_ms:
+                ttft_scores.append(1.0)
+            else:
+                ttft_scores.append(np.tanh((slack_ms - ttft_remaining_time)/req.ttft_slo))
+
+        rew_decode = np.mean(tpot_scores) if tpot_scores else 0.0
+        rew_prefill = np.mean(ttft_scores) if ttft_scores else 0.0
+
+        # 正向奖励
+        rew_budget = select_token_budget/self.token_budget_norm
+
+        # ---------- 综合 ----------
+        reward = (self.lambda_decode * rew_decode) + \
+                (self.lambda_prefill * rew_prefill) + \
+                (self.lambda_budget * rew_budget)
+        
+        REW_DECODE.set(rew_decode)
+        REW_PREFILL.set(rew_prefill)
+        REWARD.set(reward)
+        REW_BUDGET.set(rew_budget)
+
+        return reward
+
+    def _progess_penalty(self,progress):
+        if progress <= self.progress_d1:
+            return self.lambda_progress_d1
+        elif progress <= self.progress_d2:
+            return self.lambda_progress_d2
+        elif progress <= self.progress_d3:
+            return self.lambda_progress_d3
+        elif progress <= self.progress_d4:
+            return self.lambda_progress_d4 
+        else:
+            return self.lambda_progress_d5
+        
+    def _caculate_reward_v3(self, before_env_info,after_env_info):
+        reward = 0.0
+
+        # env 信息
+        before_time = before_env_info.get("now_time")
+        before_running_req = before_env_info.get("running_requests",[])
+        before_waiting_req = before_env_info.get("waiting_requests",[])
+
+        after_time = after_env_info.get("now_time")
+        model_run_time = after_env_info.get("model_run_time",0.0)
+        select_token_budget = after_env_info.get("select_token_budget", 0)
+
+        ttft_scores, tpot_scores = [], []
+        total_prompt_count = 0
+
+        for req in before_running_req:
+            # 运行的请求
+            output_tokens = req.num_computed_tokens - req.num_prompt_tokens
+            if output_tokens>= 0:
+                progress = output_tokens/req.max_tokens
+                # decode 阶段
+                if progress >= self.tpot_start:
+                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
+                    if tpot <= self.tpot_slo:
+                        tpot_scores.append(1.0)
+                    else:
+                        tpot_scores.append(self._progess_penalty(progress)*np.tanh((self.tpot_slo-tpot)/self.tpot_slo))
             else:
                 # prefill 阶段
                 total_prompt_count += req.num_prompt_tokens - req.num_computed_tokens

@@ -43,6 +43,7 @@ logger = init_logger(__name__)
 try:
     from .rl import RLScheduler
     from .rl import RLDataCollection
+    from .rl.RLUtils import adjust_waiting_seq
     RL_SCHEDULER_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"RL Scheduler not available: {e}")
@@ -1064,6 +1065,17 @@ class Scheduler(SchedulerInterface):
             model_run_ms = float(f"{model_run_duration*1000:.3f}")
             self.update_rl_env_info(True,model_run_ms)
             self.rl_scheduler.record_performance(self.rl_env_info)
+
+            # time1 = time.time()
+            # # 调整 waiting 队列顺序
+            # if len(self.waiting) > 1 and self.rl_env_info['last_token_budget'] != self.rl_env_info['select_token_budget']:
+            #     self.waiting = adjust_waiting_seq(
+            #         self.waiting,
+            #         self.rl_env_info['select_token_budget'],
+            #         model_run_duration,
+            #     )
+            #     adjust_time = time.time() - time1
+            #     logger.info(f"adjust_waiting_seq cost time: {adjust_time*1000:.3f}")
             
         return engine_core_outputs
 
