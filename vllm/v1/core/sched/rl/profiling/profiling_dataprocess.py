@@ -34,4 +34,5 @@ def main(path):
 
 if __name__ == "__main__":
     # 替换为你的文件路径
-    main("vllm/vllm/v1/core/sched/rl/profiling/2025-12-30/profiling_2025-12-30 23:40:59.jsonl")
+    main("vllm/vllm/v1/core/sched/rl/profiling/2026-01-07/profiling_2026-01-07 23:03:32.jsonl")
+    main("vllm/vllm/v1/core/sched/rl/profiling/2026-01-07/profiling_2026-01-07 23:21:28.jsonl")

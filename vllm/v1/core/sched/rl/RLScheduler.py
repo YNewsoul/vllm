@@ -40,6 +40,8 @@ class RLScheduler:
 
         current_dir = os.path.dirname(os.path.abspath(__file__))
         self.time_out_info_path = os.path.join(current_dir, "timeout_info.jsonl")
+
+        self.K_running = self.config.K_running
         
     def compute_schedule_decision(self,env_info:Dict):
         """计算 RL 调度决策 """
@@ -113,6 +115,9 @@ class RLScheduler:
                 elif num_prefill == 0 and num_decode != 0:
                     # 3.2、 所有运行请求都处于 decode 阶段
                     return
+                elif num_running > self.K_running:
+                    # 运行请求数过多
+                    return
                 # 3.3、运行请求有 prefill 和 decode 请求，需要RL scheduler
                 return 0
             
@@ -123,6 +128,9 @@ class RLScheduler:
                     return
                 elif num_prefill == 0 and num_decode != 0:
                     # 4.2 所有运行请求都处于 decode 阶段
+                    return
+                elif num_running > self.K_running:
+                    # 运行请求数过多
                     return
                 # 4.3 运行的请求有 prefill 和 decode 请求，需要RL scheduler
                 return 1

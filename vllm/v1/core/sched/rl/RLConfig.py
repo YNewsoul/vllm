@@ -23,7 +23,7 @@ class RLSchedulerConfig:
     rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
     use_pretrained_model: bool = False   # 是否使用预训练模型
     pretrained_model_path: str = ""      # 预训练模型路径
-    model_save_frequency: float = 300.0  # 保存模型频率（单位：秒）
+    model_save_frequency: float = 600.0  # 保存模型频率（单位：秒）
     log_frequency: int = 40              # 日志记录频率（单位：step）
     action_dim: int = 6                # 动作维度（根据环境定义）
 
@@ -86,7 +86,7 @@ class RLSchedulerConfig:
             rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),
             use_pretrained_model=os.getenv('VLLM_RL_USE_PRETRAINED_MODEL', 'false').lower() == 'true',
             pretrained_model_path=os.getenv('VLLM_RL_PRETRAINED_MODEL_PATH', ''),
-            model_save_frequency=float(os.getenv('VLLM_RL_MODEL_SAVE_FREQUENCY', '300.0')),
+            model_save_frequency=float(os.getenv('VLLM_RL_MODEL_SAVE_FREQUENCY', '600.0')),
             log_frequency=int(os.getenv('VLLM_RL_LOG_FREQUENCY', '40')),
             action_dim=int(os.getenv('VLLM_RL_ACTION_DIM', '6')),
 
@@ -124,12 +124,12 @@ class RLSchedulerConfig:
             lambda_budget=float(os.getenv('VLLM_RL_LAMBDA_BUDGET', '0.5')),
 
             progress_d1=float(os.getenv('VLLM_RL_PROGRESS_D1', '0.3')),
-            progress_d2=float(os.getenv('VLLM_RL_PROGRESS_D2', '0.5')),
-            progress_d3=float(os.getenv('VLLM_RL_PROGRESS_D3', '0.65')),
+            progress_d2=float(os.getenv('VLLM_RL_PROGRESS_D2', '0.45')),
+            progress_d3=float(os.getenv('VLLM_RL_PROGRESS_D3', '0.6')),
             progress_d4=float(os.getenv('VLLM_RL_PROGRESS_D4', '0.7')),
             lambda_progress_d1=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D1', '0.1')),
-            lambda_progress_d2=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D2', '0.3')),
-            lambda_progress_d3=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D3', '0.5')),
+            lambda_progress_d2=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D2', '0.5')),
+            lambda_progress_d3=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D3', '1')),
             lambda_progress_d4=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D4', '1.4')),
             lambda_progress_d5=float(os.getenv('VLLM_RL_LAMBDA_PROGRESS_D5', '1.7')),
 

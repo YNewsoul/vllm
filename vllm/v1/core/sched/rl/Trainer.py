@@ -220,16 +220,16 @@ class Trainer:
         return reward
 
     def _progess_penalty(self,progress):
-        if progress <= self.progress_d1:
-            return self.lambda_progress_d1
-        elif progress <= self.progress_d2:
-            return self.lambda_progress_d2
-        elif progress <= self.progress_d3:
-            return self.lambda_progress_d3
-        elif progress <= self.progress_d4:
-            return self.lambda_progress_d4 
+        if progress <= self.progress_d1:   # 0.3
+            return self.lambda_progress_d1  # 0.1
+        elif progress <= self.progress_d2: # 0.5 -> 0.45
+            return self.lambda_progress_d2  # 0.3 -> 0.5
+        elif progress <= self.progress_d3: # 0.65 -> 0.6
+            return self.lambda_progress_d3  # 0.5 -> 1
+        elif progress <= self.progress_d4: # 0.7
+            return self.lambda_progress_d4  # 1.4
         else:
-            return self.lambda_progress_d5
+            return self.lambda_progress_d5  # 1.7
         
     def _caculate_reward_v3(self, before_env_info,after_env_info):
         reward = 0.0
