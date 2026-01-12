@@ -1073,16 +1073,13 @@ class Scheduler(SchedulerInterface):
             self.update_rl_env_info(True,model_run_ms)
             self.rl_scheduler.record_performance(self.rl_env_info)
 
-            # time1 = time.time()
             # 调整 waiting 队列顺序
-            if len(self.waiting) > 1 and self.rl_env_info['last_token_budget'] != self.rl_env_info['select_token_budget']:
+            if len(self.waiting) > 1 :
                 self.waiting = adjust_waiting_seq(
                     self.waiting,
                     self.rl_env_info['select_token_budget'],
                     model_run_duration,
                 )
-                # adjust_time = time.time() - time1
-                # logger.info(f"adjust_waiting_seq cost time: {adjust_time*1000:.3f}")
             
         return engine_core_outputs
 

@@ -11,6 +11,7 @@ try:
     from .RLAgent import RLAgent
     from .Trainer import Trainer
     from .Env import Env
+    from .RLUtils import heuristic_algorithm
 except ImportError:
     from RLConfig import RLSchedulerConfig
     from RLAgent import RLAgent
@@ -42,6 +43,7 @@ class RLScheduler:
         self.time_out_info_path = os.path.join(current_dir, "timeout_info.jsonl")
 
         self.K_running = self.config.K_running
+        self.heuristic_algorithm_enabled = self.config.heuristic_algorithm_enabled
         
     def compute_schedule_decision(self,env_info:Dict):
         """计算 RL 调度决策 """
@@ -49,11 +51,14 @@ class RLScheduler:
         # start_rl_schedule_time = time.time()
         token_budget = env_info["max_num_scheduled_tokens"]
         schedule_judge = self._schedule_judge(env_info)
-        use_rl_schedule = False
+        use_rl_schedule = True
         if schedule_judge is not None:
             env_info["scenario_id"] = schedule_judge
             self.env.set_before_env_info(env_info)
-            token_budget = self.rl_agent.select(self.env.get_before_env_info())
+            if self.heuristic_algorithm_enabled:
+                token_budget = heuristic_algorithm(env_info,self.config.tpot_slo)
+            else:
+                token_budget = self.rl_agent.select(self.env.get_before_env_info())
             use_rl_schedule = True
        
         # time_rl_agent_select = (time.time() - start_rl_schedule_time)*1000

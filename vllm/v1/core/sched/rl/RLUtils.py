@@ -7,6 +7,7 @@ import math
 import random
 from collections import deque
 from typing import Deque, Tuple
+from typing import Dict
 
 try:
     from .RLConfig import RLSchedulerConfig
@@ -55,10 +56,11 @@ def _eval_ttft_goodput(
     """返回 (总代价, 违约索引列表)"""
     violators = []
     acc_time = 0.0
+    acc_tokens = 0
     for idx, req in enumerate(waiting):
-        p_time = math.ceil(req.num_prompt_tokens / select_token_budget) * model_run_time
-        ttft_ms = acc_time + p_time
-        if ttft_ms > req.ttft_slo:
+        acc_tokens += req.num_prompt_tokens
+        p_time = math.ceil(acc_tokens / select_token_budget) * model_run_time
+        if p_time > req.ttft_slo:
             violators.append(idx)
         acc_time += p_time
     goodput = (len(waiting) - len(violators))/acc_time
@@ -68,14 +70,14 @@ def adjust_waiting_seq(
     waiting: Deque,
     select_token_budget: int,
     model_run_time: float,
-    iters: int = 10,
-    init_temp: float = 5.0,
-    temp_threshold: float = 0.1,
-    cooling: float = 0.9,
 ) -> Deque:
     """
     对 waiting 队列做模拟退火重排序。邻域：将随机选中的不满足 TTFT 的请求前移一格。
     """
+    iters = 10
+    init_temp = 5.0
+    temp_threshold = 0.1
+    cooling = 0.9
     cur_seq = deque(waiting)
     cur_goodput, cur_violators = _eval_ttft_goodput(cur_seq, select_token_budget, model_run_time)
     best_seq, best_goodput = deque(cur_seq), cur_goodput
@@ -85,21 +87,24 @@ def adjust_waiting_seq(
         # if temp < temp_threshold:
         #     break
         
-        # 选邻域：优先选非队头的违约请求前移，否则随机交换两个请求
+        # 1.选邻域：优先选非队头的违约请求前移，否则随机交换两个请求
         candidates = [i for i in cur_violators if i > 0]
         new_seq = deque(cur_seq)
         if candidates:
+            # 随机选一个违约请求前移，生成新序列
             idx = random.choice(candidates)
             req = new_seq[idx]
             new_seq.remove(req)
             new_seq.insert(idx - 1, req)
         else:
-            if len(new_seq) >= 2:
-                i, j = random.sample(range(len(new_seq)), 2)
-                new_seq[i], new_seq[j] = new_seq[j], new_seq[i]
+            # 随机交换两个请求，生成新序列
+            i, j = random.sample(range(len(new_seq)), 2)
+            new_seq[i], new_seq[j] = new_seq[j], new_seq[i]
 
+        # 2.计算新序列的 goodput
         new_goodput, new_violators = _eval_ttft_goodput(new_seq, select_token_budget, model_run_time)
 
+        # 3.判断是否接受新序列
         accept = False
         delta = new_goodput - cur_goodput
         if delta > 0:
@@ -107,6 +112,7 @@ def adjust_waiting_seq(
         # elif math.exp(delta / max(temp, 1e-6)) > random.random():
         #     accept = True
         
+        # 4.接受新序列
         if accept:
             cur_seq, cur_goodput, cur_violators = new_seq, new_goodput, new_violators
             if cur_goodput > best_goodput:
@@ -114,3 +120,18 @@ def adjust_waiting_seq(
         # temp *= cooling
 
     return best_seq
+
+def heuristic_algorithm(env_info:Dict,tpot_slo:float):
+        """
+        启发式算法，根据环境信息，返回一个 token_budget
+        """
+        running = env_info['running_requests']
+        now_time = env_info["now_time"]
+        for req in running:
+            output_tokens = req.num_computed_tokens - req.num_prompt_tokens
+            if output_tokens>= 2:
+                # 解码阶段请求
+                tpot = (now_time -req.ttft_time)/(output_tokens - 1)*1000.0
+                if tpot > tpot_slo:
+                    return 64
+        return 2048

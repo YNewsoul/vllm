@@ -18,6 +18,7 @@ class RLSchedulerConfig:
 
     # === 2 Agent 参数 =============
     ## ==== 2.1 整体参数 ====
+    heuristic_algorithm_enabled: bool = False    # 是否使用启发式算法
     device: str = "cpu"                  # 训练所用设备（cuda/cpu）
     train_enabled: bool = False          # 是否进行训练
     rl_model: str = "DualAttentionNetwork"        # 强化学习模型类型（MLPNetwork/TransformerNetwork）
@@ -81,6 +82,7 @@ class RLSchedulerConfig:
 
             # 2 Agent 参数
             ## ==== 2.1 整体参数 ====
+            heuristic_algorithm_enabled=os.getenv('VLLM_RL_HEURISTIC_ALGORITHM_ENABLED', 'false').lower() == 'true',
             device=os.getenv('VLLM_RL_DEVICE', 'cpu').lower(),
             train_enabled=os.getenv('VLLM_RL_TRAIN_ENABLED', 'false').lower() == 'true',
             rl_model=os.getenv('VLLM_RL_MODEL', 'DualAttentionNetwork'),

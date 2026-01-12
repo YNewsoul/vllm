@@ -302,26 +302,26 @@ class RLAgent:
         running_feats, run_mask = [], []
         remain_prefill_tokens = 0
 
-        for r in running[:self.K_running]:
-            output_tokens = r.num_computed_tokens - r.num_prompt_tokens
+        for req in running[:self.K_running]:
+            output_tokens = req.num_computed_tokens - req.num_prompt_tokens
             if output_tokens >= 0:
                 # decode请求
                 # 1.当前 TPOT
-                if output_tokens == 0:
+                if output_tokens <= 1:
                     tpot_status = 0.0
                 else:
-                    tpot = (now_time - r.ttft_time)/output_tokens*1000
+                    tpot = (now_time - req.ttft_time)/output_tokens*1000
                     tpot_status = np.tanh((self.tpot_slo-tpot)/self.tpot_slo)
                 # 2.进度比例
-                # tpot_start_tokens = (r.max_tokens*self.tpot_start)
+                # tpot_start_tokens = (req.max_tokens*self.tpot_start)
                 # progress = np.tanh((output_tokens - tpot_start_tokens) / tpot_start_tokens)
-                progress = output_tokens/r.max_tokens
+                progress = output_tokens/req.max_tokens
                 running_feats.append([progress, tpot_status,1.0])
             else:
                 remain_prefill_tokens -= output_tokens
                 remaining_prefill  = np.tanh(remain_prefill_tokens/ self.prompt_norm)
-                slack_ms = r.ttft_slo - (now_time - r.arrival_time)
-                urgency = np.tanh((slack_ms) / r.ttft_slo)
+                slack_ms = req.ttft_slo - (now_time - req.arrival_time)
+                urgency = np.tanh((slack_ms) / req.ttft_slo)
                 running_feats.append([remaining_prefill,urgency,-1.0])
             run_mask.append(1.0)
         while len(running_feats) < self.K_running:
@@ -331,11 +331,11 @@ class RLAgent:
 
         waiting_feats, wait_mask = [], []
         # ---- 等待队列 top-K ----
-        for r in waiting[:self.K_waiting]:
-            remain_prefill_tokens += r.num_prompt_tokens
+        for req in waiting[:self.K_waiting]:
+            remain_prefill_tokens += req.num_prompt_tokens
             remaining_prefill = np.tanh(remain_prefill_tokens / self.prompt_norm)
-            slack_ms = r.ttft_slo - (now_time - r.arrival_time)
-            urgency = np.tanh(slack_ms / r.ttft_slo)
+            slack_ms = req.ttft_slo - (now_time - req.arrival_time)
+            urgency = np.tanh(slack_ms / req.ttft_slo)
             waiting_feats.append([remaining_prefill, urgency,-1.0])
             wait_mask.append(1.0)
         while len(waiting_feats) < self.K_waiting:
