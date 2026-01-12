@@ -93,7 +93,7 @@ class Request:
 
 
     def _set_other_attribute(self):
-        self.arrival_time = time.monotonic()
+        self.arrival_time = time.time()
         if self.sampling_params.extra_args:
             self.extra_data = self.sampling_params.extra_args.get('extra_data', None)
             if self.extra_data:
@@ -101,6 +101,7 @@ class Request:
                 self.ttft_slo = self.extra_data.get('ttft_slo', None)
                 self.request_data_id = self.extra_data.get('request_data_id', None)
         self.ttft = None
+        self.ttft_time = None
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":

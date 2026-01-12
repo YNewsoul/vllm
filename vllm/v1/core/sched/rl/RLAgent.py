@@ -310,7 +310,7 @@ class RLAgent:
                 if output_tokens == 0:
                     tpot_status = 0.0
                 else:
-                    tpot = (now_time - r.ttft)/output_tokens*1000
+                    tpot = (now_time - r.ttft_time)/output_tokens*1000
                     tpot_status = np.tanh((self.tpot_slo-tpot)/self.tpot_slo)
                 # 2.进度比例
                 # tpot_start_tokens = (r.max_tokens*self.tpot_start)

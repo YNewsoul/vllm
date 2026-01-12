@@ -123,7 +123,7 @@ class Trainer:
             if output_tokens>= 0:
                 # decode 阶段
                 if output_tokens > req.max_tokens*self.tpot_start:
-                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
+                    tpot = (after_time -req.ttft_time)/(output_tokens+1)*1000.0
                     if tpot <= self.tpot_slo:
                         tpot_scores.append(1.0)
                     else:
@@ -179,7 +179,7 @@ class Trainer:
             if output_tokens>= 0:
                 # decode 阶段
                 if output_tokens > req.max_tokens*self.tpot_start:
-                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
+                    tpot = (after_time -req.ttft_time)/(output_tokens+1)*1000.0
                     tpot_scores.append(np.tanh((self.tpot_slo-tpot)/self.tpot_slo))
             else:
                 # prefill 阶段
@@ -253,7 +253,7 @@ class Trainer:
                 progress = output_tokens/req.max_tokens
                 # decode 阶段
                 if progress >= self.tpot_start:
-                    tpot = (after_time -req.arrival_time)/(output_tokens+1)*1000.0
+                    tpot = (after_time -req.ttft_time)/(output_tokens+1)*1000.0
                     if tpot <= self.tpot_slo:
                         tpot_scores.append(1.0)
                     else:
