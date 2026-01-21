@@ -194,7 +194,7 @@ class Scheduler(SchedulerInterface):
         profiling_log_dir = os.getenv('VLLM_SCHEDULER_PROFILING_LOG', 'profiling')
         date_dir = os.path.join(profiling_log_dir,datetime.now().strftime("%Y-%m-%d"))
         os.makedirs(date_dir, exist_ok=True)
-        formatted_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        formatted_time = datetime.now().strftime("%Y-%m-%d %H_%M_%S")
         
         self.profiling_log_file = os.path.join(date_dir, f"profiling_{formatted_time}.jsonl")
         if self.enable_profiling and self.profiling_log_file:

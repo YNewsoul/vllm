@@ -129,7 +129,7 @@ class RLAgent:
         date_dir = os.path.join(training_logs_dir, current_time.strftime("%Y-%m-%d"))
         os.makedirs(date_dir, exist_ok=True)
         # 创建具体时间目录
-        formatted_time = current_time.strftime("%Y-%m-%d %H:%M:%S")
+        formatted_time = current_time.strftime("%Y-%m-%d %H_%M_%S")
         time_dir = os.path.join(date_dir, formatted_time)
         os.makedirs(time_dir, exist_ok=True)
         # 创建模型保存目录
@@ -276,7 +276,7 @@ class RLAgent:
 
     def save_model(self,) -> None:
         """保存模型权重"""
-        formatted_time = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+        formatted_time = datetime.now().strftime("%Y-%m-%d_%H_%M_%S")
         save_path = os.path.join(self.model_save_dir, f"model_{formatted_time}")
         torch.save(self.main_model.state_dict(), save_path)
         logger.info(f"save model successfully, to {save_path}")

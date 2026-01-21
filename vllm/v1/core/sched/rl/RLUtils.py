@@ -121,17 +121,61 @@ def adjust_waiting_seq(
 
     return best_seq
 
+def get_chunk_size(cs_2048:int,prompt_count:int,d_token:int,time_slo:float):
+    """
+    根据 time_slo 动态调整 chunk_size
+    """
+    cs_64 = math.ceil(max(0,prompt_count - 2048*cs_2048)/64)
+    predict_time = min(d_token,cs_2048)*450.0 \
+                    + min(max(0,d_token-cs_2048),cs_64)*40.0 \
+                    + max(0,d_token-cs_2048-cs_64)*15.0
+
+    if cs_2048 == 0:
+        if predict_time <= time_slo:
+            return 64
+        return 2048
+    
+    if predict_time <= time_slo:
+        return 2048
+    else:
+        return get_chunk_size(cs_2048-1,prompt_count,d_token,time_slo)
+
 def heuristic_algorithm(env_info:Dict,tpot_slo:float):
         """
         启发式算法，根据环境信息，返回一个 token_budget
         """
         running = env_info['running_requests']
+        waiting = env_info['waiting_requests']
         now_time = env_info["now_time"]
+
+        prompt_count = 0
+        for req in reversed(running):
+            output_tokens = req.num_computed_tokens - req.num_prompt_tokens
+            if output_tokens <= 0:
+                # prefill 请求
+                prompt_count -= output_tokens
+                ttft_remaining_time = (math.ceil(prompt_count/2048))*0.450
+                slack_ms = req.ttft_slo - (now_time-req.arrival_time)
+                if ttft_remaining_time > slack_ms:
+                    # 满足ttft为第一要义
+                    return 2048
+                break
+        for req in reversed(waiting):
+            prompt_count += req.num_prompt_tokens
+            ttft_remaining_time = (math.ceil(prompt_count/2048))*0.450
+            slack_ms = req.ttft_slo - (now_time-req.arrival_time)
+            if ttft_remaining_time > slack_ms:
+                # 满足ttft为第一要义
+                return 2048
+        
+        cs_2048 = math.ceil(prompt_count/2048)
+
         for req in running:
             output_tokens = req.num_computed_tokens - req.num_prompt_tokens
-            if output_tokens>= 2:
-                # 解码阶段请求
-                tpot = (now_time -req.ttft_time)/(output_tokens - 1)*1000.0
-                if tpot > tpot_slo:
+            if output_tokens > 0:
+                d_token = req.max_tokens - output_tokens
+                time_slo = tpot_slo*req.max_tokens - (now_time - req.ttft_time)
+                chunk_size =  get_chunk_size(cs_2048,prompt_count,d_token,time_slo)
+                if chunk_size != 2048:
                     return 64
         return 2048

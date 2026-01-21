@@ -53,7 +53,7 @@ class RLSchedulerConfig:
     replay_buffer_size: int = 30000    # 经验回放缓冲区大小
     train_batch_size: int = 64        # 训练批次大小
     train_total_time: float = 28800.0 # 训练总时间（单位：s）
-    tpot_slo: float = 50.0            # TPOT SLO
+    tpot_slo: float = 60.0            # TPOT SLO
     tpot_start: float = 0.3           # TPOT 计算开始比例
 
     # ==== 3.2 Reward 函数参数 ====
@@ -117,7 +117,7 @@ class RLSchedulerConfig:
             replay_buffer_size=int(os.getenv('VLLM_RL_REPLAY_BUFFER_SIZE', '30000')),
             train_batch_size=int(os.getenv('VLLM_RL_TRAIN_BATCH_SIZE', '64')),
             train_total_time=float(os.getenv('VLLM_RL_TRAIN_TOTAL_TIME', '28800.0')),
-            tpot_slo=float(os.getenv('VLLM_RL_TPOT_SLO', '50.0')),
+            tpot_slo=float(os.getenv('VLLM_RL_TPOT_SLO', '60.0')),
             tpot_start=float(os.getenv('VLLM_RL_TPOT_START', '0.3')),
 
             ## ==== 3.2 Reward 函数参数 ====
