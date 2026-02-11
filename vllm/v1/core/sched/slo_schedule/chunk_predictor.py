@@ -1,20 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 用于分块耗时预测的训练与推理工具函数
 
 背景知识：
-- Chunk Prefill 是 LLM 推理中的一种调度策略，将大的 prefill 请求
-  分成多个小块（chunk）与 decode 请求混合执行，以减少首 token 延迟（TTFT）
-- 每个 chunk 包含多个请求，每个请求可能处于 prefill（预填充）或
-  decode（解码）阶段
-- Prefill 阶段：处理输入 prompt，一次计算多个 token，计算密集型
-- Decode 阶段：自回归生成，每次只生成 1 个 token，内存带宽受限
+- Chunk Prefill 是 LLM 推理中的一种调度策略，将大的 prefill 请求分成多个小块（chunk）
+  与 decode 请求混合执行，以减少首 token 延迟（TTFT）
+- 每个 chunk 包含多个请求，每个请求可能处于 prefill（预填充）或 decode（解码）阶段
+- Prefill 阶段：处理输入 prompt，一次计算多个 token，计算密集型（compute-bound）
+- Decode 阶段：自回归生成，每次只生成 1 个 token，内存带宽受限（memory-bound）
 """
 
 import warnings
 from datetime import datetime
-from typing import Optional
+from typing import Dict, List, Optional
 
 import joblib
 import numpy as np
@@ -31,169 +28,18 @@ warnings.filterwarnings(
 )
 
 
-def extract_features(record: dict) -> dict:
-    """
-    从单条 profiling 记录提取用于预测 model_run_duration_ms 的特征
-
-    LLM 推理耗时主要由以下因素决定：
-    1. Attention 计算复杂度: O(seq_len * context_len)
-    2. KV Cache 读取量（影响内存带宽）
-    3. 请求数量（影响 batch 并行度）
-
-    Args:
-        record: 包含以下字段的dict
-            - chunk_sizes: 每个请求在本次 chunk 中处理的 token 数
-                          =1 表示 decode 请求，>1 表示 prefill 请求
-            - all_cached_tokens: 每个请求已缓存的 KV cache token 数
-            - all_computed_tokens: 每个请求已计算的总 token 数
-            - total_scheduled_tokens: 本次 chunk 的总 token budget
-            - num_running_reqs: 正在运行的请求数
-
-    Returns:
-        features: 提取的特征字典
-    """
-    chunk_sizes = record["chunk_sizes"]
-    all_cached_tokens = record["all_cached_tokens"]
-    all_computed_tokens = record["all_computed_tokens"]
-
-    features: dict[str, float] = {}
-
-    # ==================== Decode 请求特征 ====================
-    # Decode 请求特点：chunk_size == 1，每次只生成一个 token
-    # 性能瓶颈：内存带宽（需要读取完整的 KV cache）
-    decode_indices = [i for i, s in enumerate(chunk_sizes) if s == 1]
-
-    # decode 请求数量：影响 batch size 和并行度
-    features["num_decode_reqs"] = len(decode_indices)
-
-    # decode 请求的总 KV cache 大小：反映内存读取压力
-    # 每个 decode token 需要与所有历史 KV 做 attention
-    features["decode_total_kv_cache"] = sum(all_cached_tokens[i]
-                                            for i in decode_indices)
-
-    # decode 请求已计算的 token 总数（通常 = cached_tokens，用于交叉验证）
-    features["decode_total_computed"] = sum(all_computed_tokens[i]
-                                            for i in decode_indices)
-
-    # ==================== Prefill 请求特征 ====================
-    # Prefill 请求特点：chunk_size > 1，一次处理多个输入 token
-    # 性能瓶颈：计算密集（矩阵乘法、attention 计算）
-    prefill_indices = [i for i, s in enumerate(chunk_sizes) if s > 1]
-
-    # prefill 请求数量
-    features["num_prefill_reqs"] = len(prefill_indices)
-
-    if prefill_indices:
-        prefill_tokens = [chunk_sizes[i] for i in prefill_indices]
-        prefill_cached = [all_cached_tokens[i] for i in prefill_indices]
-
-        # prefill 总 token 数：直接影响 FFN 和 QKV 投影的计算量
-        features["prefill_total_tokens"] = sum(prefill_tokens)
-
-        # prefill 最大/最小 token 数：反映请求的不均衡程度
-        # 不均衡会导致 GPU 利用率下降（短请求需要 padding）
-        features["prefill_max_tokens"] = max(prefill_tokens)
-        features["prefill_min_tokens"] = min(prefill_tokens)
-
-        # prefill 请求的总 KV cache：用于 cross-attention
-        features["prefill_total_kv_cache"] = sum(prefill_cached)
-
-        # ===== Attention 计算复杂度建模 =====
-        # Attention 复杂度 = Q * (K + V)
-        #   = chunk_size * (cached_tokens + chunk_size)
-        # 其中：
-        #   - chunk_size: 当前要计算的 query token 数
-        #   - cached_tokens: 已有的 KV cache（cross-attention 部分）
-        #   - chunk_size: 当前 chunk 内部的 self-attention 部分
-        features["prefill_attention_cost"] = sum(
-            chunk_sizes[i] * (all_cached_tokens[i] + chunk_sizes[i])
-            for i in prefill_indices)
-
-        # Cross-attention 开销：Q 与历史 KV 的 attention
-        # 复杂度 ~ chunk_size * cached_tokens
-        features["prefill_kv_product"] = sum(
-            chunk_sizes[i] * all_cached_tokens[i] for i in prefill_indices)
-
-        # Self-attention 开销：当前 chunk 内部 token 之间的 attention
-        # 复杂度 ~ chunk_size^2（因为 mask 下实际是 chunk_size^2 / 2）
-        features["prefill_self_attention"] = sum(chunk_sizes[i]**2
-                                                 for i in prefill_indices)
-    else:
-        # 无 prefill 请求时，所有 prefill 相关特征置零
-        features["prefill_total_tokens"] = 0
-        features["prefill_max_tokens"] = 0
-        features["prefill_min_tokens"] = 0
-        features["prefill_total_kv_cache"] = 0
-        features["prefill_attention_cost"] = 0
-        features["prefill_kv_product"] = 0
-        features["prefill_self_attention"] = 0
-
-    # ==================== 全局特征 ====================
-    # 总调度 token 数：本次 chunk 的 token budget 上限
-    features["total_scheduled_tokens"] = record["total_scheduled_tokens"]
-
-    # 总运行请求数：影响 batch 并行效率
-    features["num_running_reqs"] = record["num_running_reqs"]
-
-    # 所有请求的总 KV cache：反映总内存占用和读取量
-    features["total_kv_cache"] = sum(all_cached_tokens)
-
-    # 所有请求已计算的 token 总数
-    features["total_computed_tokens"] = sum(all_computed_tokens)
-
-    # ==================== 交互特征 ====================
-    # Decode-Prefill 交互项：当 decode 和 prefill 混合时，
-    # 会产生额外的调度开销和 GPU 资源竞争
-    # 这个特征捕捉混合 batching 带来的性能干扰
-    features["decode_prefill_interaction"] = (features["num_decode_reqs"] *
-                                              features["prefill_total_tokens"])
-
-    # 可选：目标字段（训练时使用）
-    if "model_run_duration_ms" in record:
-        features["model_run_duration_ms"] = record["model_run_duration_ms"]
-
-    return features
-
-
-def prepare_dataset(data: list[dict], ) -> tuple[pd.DataFrame, np.ndarray]:
-    """
-    将原始 profiling 列表转换为特征矩阵和目标值
-
-    Args:
-        data: profiling 列表，每条记录包含 chunk 的详细信息
-
-    Returns:
-        feature_df: 特征 DataFrame，每行一个样本，每列一个特征
-        target: 目标值数组（model_run_duration_ms）
-    """
-    features_list = [extract_features(record) for record in data]
-    df = pd.DataFrame(features_list)
-
-    target = df["model_run_duration_ms"].values
-    feature_df = df.drop(columns=["model_run_duration_ms"])
-
-    return feature_df, target
-
-
 class DurationPredictor:
     """
     用于预测 LLM Chunk Prefill 单次前向计算耗时的回归模型
 
     模型架构：多项式特征 + 标准化 + Ridge 回归
-    - 多项式特征：捕捉特征之间的非线性交互
+    - 多项式特征：捕捉特征之间的非线性交互（如 prefill_tokens * kv_cache）
     - 标准化：消除不同特征量纲差异，加速收敛
     - Ridge 回归：L2 正则化防止过拟合，对多重共线性鲁棒
-
-    使用场景：
-    1. 离线训练：用历史 profiling 数据训练模型
-    2. 在线推理：调度器实时预测不同调度方案的耗时，辅助决策
     """
 
     def __init__(
-        self,
-        degree: int = 2,
-        alpha: float = 1.0,
-        model_path: Optional[str] = None,
+        self, degree: int = 2, alpha: float = 1.0, model_path: Optional[str] = None
     ):
         """
         初始化预测器
@@ -202,7 +48,6 @@ class DurationPredictor:
             degree: 多项式特征的最高次数，默认 2（二次交互）
                    - degree=1: 线性模型
                    - degree=2: 包含 x1*x2, x1^2 等二次项
-                   - degree>2: 更复杂的非线性，但容易过拟合
             alpha: Ridge 回归的正则化强度，默认 1.0
                    - alpha 越大，模型越简单，防止过拟合
                    - alpha 越小，模型越复杂，拟合能力更强
@@ -215,13 +60,17 @@ class DurationPredictor:
         self.model = Ridge(alpha=alpha)
         self.feature_names = None  # 原始特征名，用于推理时特征对齐
 
+        # 合并系数，用于 ultrafast 预测（将 scaler 和 model 合并）
+        # 公式: y = X_poly @ combined_coef + combined_intercept
+        self._combined_coef: Optional[np.ndarray] = None
+        self._combined_intercept: Optional[float] = None
+
         if model_path:
             self._load(model_path)
 
     def fit(self, X: pd.DataFrame, y: np.ndarray):
         """
         训练模型
-
         流程：原始特征 -> 多项式展开 -> 标准化 -> Ridge 回归
 
         Args:
@@ -235,17 +84,78 @@ class DurationPredictor:
         X_poly = self.poly.fit_transform(X)  # 生成多项式特征
         X_scaled = self.scaler.fit_transform(X_poly)  # 标准化
         self.model.fit(X_scaled, y)  # 训练 Ridge 回归
+        self._precompute_combined_coef()  # 预计算合并系数（用于加速预测）
         return self
+
+    def _precompute_combined_coef(self):
+        """
+        预计算合并后的系数，将标准化器和模型合并为单次运算
+
+        数学推导：
+            原始公式: y = ((X_poly - mean) / scale) @ coef + intercept
+                      = X_poly @ (coef / scale) - mean @ (coef / scale) + intercept
+            合并公式: y = X_poly @ combined_coef + combined_intercept
+
+        其中：
+            combined_coef = coef / scale          （系数除以标准差）
+            combined_intercept = intercept - mean @ combined_coef  （截距减去均值贡献）
+
+        优化效果：将预测从 3 次运算减少到 1 次矩阵乘法
+        """
+        # combined_coef = coef / scale
+        self._combined_coef = self.model.coef_ / self.scaler.scale_
+        # combined_intercept = intercept - mean @ combined_coef
+        self._combined_intercept = float(
+            self.model.intercept_ - np.dot(self.scaler.mean_, self._combined_coef)
+        )
+        # Precompute polynomial expansion indices for ultrafast prediction
+        self._precompute_poly_indices()
+
+    def _precompute_poly_indices(self):
+        """
+        预计算多项式展开的索引，用于极致优化的手动展开
+
+        对于 degree=2、n 个特征的多项式展开，会产生：
+        - n 个线性项: x0, x1, ..., x(n-1)
+        - n*(n+1)/2 个二次项: x0^2, x0*x1, ..., x(n-1)^2
+
+        我们将索引存储为元组，以便直接数组访问
+        这完全消除了 sklearn PolynomialFeatures.transform() 的开销
+        """
+        n_features = len(self.feature_names)
+
+        # 对于 degree=2: 线性项 + 二次项（包括交叉项）
+        # 线性项: (i,) 表示 x[i]
+        # 二次项: (i, j) 表示 x[i] * x[j]，其中 i <= j
+        self._poly_indices = []
+
+        # 首先添加线性项
+        for i in range(n_features):
+            self._poly_indices.append((i,))
+
+        # 然后添加二次项（上三角矩阵，包含对角线）
+        if self.degree >= 2:
+            for i in range(n_features):
+                for j in range(i, n_features):
+                    self._poly_indices.append((i, j))
+
+        self._n_poly_features = len(self._poly_indices)
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
-        批量预测
+        批量预测（用于训练评估）
+
+        Args:
+            X: 特征 DataFrame
+
+        Returns:
+            预测的耗时数组（毫秒）
         """
         X_poly = self.poly.transform(X)
         X_scaled = self.scaler.transform(X_poly)
         return self.model.predict(X_scaled)
 
-    def evaluate(self, X: pd.DataFrame, y: np.ndarray) -> dict:
+    def evaluate(self, X: pd.DataFrame, y: np.ndarray) -> Dict:
         """
         评估模型性能
 
@@ -259,7 +169,7 @@ class DurationPredictor:
             - RMSE: 均方根误差，与目标值同量纲（ms）
             - MAE: 平均绝对误差，更鲁棒
             - R2: 决定系数，1 表示完美预测，0 表示等于预测均值
-            - mean_abs_pct_err: 平均绝对百分比误差，反映相对误差（%）
+            - MAPE: 平均绝对百分比误差，反映相对误差（%）
         """
         y_pred = self.predict(X)
         return {
@@ -267,7 +177,7 @@ class DurationPredictor:
             "RMSE": np.sqrt(mean_squared_error(y, y_pred)),
             "MAE": mean_absolute_error(y, y_pred),
             "R2": r2_score(y, y_pred),
-            "mean_abs_pct_err": np.mean(np.abs((y - y_pred) / y)) * 100,
+            "MAPE": np.mean(np.abs((y - y_pred) / y)) * 100,
         }
 
     def get_feature_importance(self, top_n: int = 20) -> pd.DataFrame:
@@ -283,19 +193,14 @@ class DurationPredictor:
         Returns:
             DataFrame，包含 feature（特征名）和 importance（重要性）列
         """
-        poly_feature_names = self.poly.get_feature_names_out(
-            self.feature_names)
+        poly_feature_names = self.poly.get_feature_names_out(self.feature_names)
         importance = np.abs(self.model.coef_) * self.scaler.scale_
-        df = pd.DataFrame({
-            "feature": poly_feature_names,
-            "importance": importance
-        })
+        df = pd.DataFrame({"feature": poly_feature_names, "importance": importance})
         return df.nlargest(top_n, "importance")
 
     def save(self, filepath: str):
         """
         保存模型到文件
-
         保存内容包括：多项式变换器、标准化器、Ridge 模型、特征名
 
         Args:
@@ -308,6 +213,9 @@ class DurationPredictor:
             "scaler": self.scaler,
             "model": self.model,
             "feature_names": self.feature_names,
+            # Combined coefficients for ultrafast prediction
+            "_combined_coef": self._combined_coef,
+            "_combined_intercept": self._combined_intercept,
             # 新增元数据
             "created_at": datetime.now().isoformat(),
         }
@@ -333,56 +241,120 @@ class DurationPredictor:
         self.scaler = model_data["scaler"]
         self.model = model_data["model"]
         self.feature_names = model_data["feature_names"]
+        # 加载合并系数（如果存在），否则重新计算
+        self._combined_coef = model_data.get("_combined_coef")
+        self._combined_intercept = model_data.get("_combined_intercept")
+        if self._combined_coef is None:
+            # 向后兼容：为旧版模型重新计算合并系数
+            self._precompute_combined_coef()
+        else:
+            # 仍需预计算多项式索引，用于 ultrafast 预测
+            self._precompute_poly_indices()
 
-    def predict_single(self, record: dict) -> float:
-        """
-        单条记录预测（适用于在线推理场景）
-        """
-        return self.predict_record(record)
-
-    def predict_record(self, record: dict) -> float:
-        """
-        单条记录快速预测，避免 DataFrame 开销
-        """
-        features = extract_features(record)
-        row = [[features[name] for name in self.feature_names]]
-        X_poly = self.poly.transform(row)
-        X_scaled = self.scaler.transform(X_poly)
-        return float(self.model.predict(X_scaled)[0])
-
-    def predict_batch(self, records: list[dict]) -> np.ndarray:
-        """
-        批量数据预测
-        """
-        features_list = [extract_features(record) for record in records]
-        X = pd.DataFrame(features_list)[self.feature_names]
-        X_poly = self.poly.transform(X)
-        X_scaled = self.scaler.transform(X_poly)
-        return self.model.predict(X_scaled)
-
-    def predict_from_raw(
+    def predict_ultrafast(
         self,
-        chunk_sizes: list[int],
-        all_cached_tokens: list[int],
-        all_computed_tokens: list[int],
+        chunk_sizes: List[int],
+        all_cached_tokens: List[int],
+        all_computed_tokens: List[int],
         total_scheduled_tokens: int,
-        num_running_reqs: int,
     ) -> float:
         """
-        从原始参数直接预测
+        极致优化的预测方法，完全手写多项式展开
+
+        Args:
+            chunk_sizes: 本次 chunk 中每个请求处理的 token 数
+            all_cached_tokens: 每个请求已缓存的 KV cache token 数
+            all_computed_tokens: 每个请求已计算的总 token 数
+            total_scheduled_tokens: 本次 chunk 的总 token 预算
+
+        Returns:
+            预测的耗时（毫秒）
         """
-        record = {
-            "chunk_sizes": chunk_sizes,
-            "all_cached_tokens": all_cached_tokens,
-            "all_computed_tokens": all_computed_tokens,
-            "total_scheduled_tokens": total_scheduled_tokens,
-            "num_running_reqs": num_running_reqs,
-        }
-        return self.predict_single(record)
+        # ===== 内联特征提取（单次遍历所有请求） =====
+        decode_count = 0  # decode 请求数量
+        decode_total_kv_cache = 0  # decode 请求的总 KV cache
+        decode_total_computed = 0  # decode 请求的总已计算 token
+        num_prefill_reqs = 0  # prefill 请求数量
+        prefill_total_tokens = 0  # prefill 总 token 数
+        prefill_max_tokens = 0  # prefill 最大 token 数
+        prefill_min_tokens = float("inf")  # prefill 最小 token 数
+        prefill_total_kv_cache = 0  # prefill 请求的总 KV cache
+        prefill_attention_cost = 0  # prefill attention 计算量
+        prefill_kv_product = 0  # prefill cross-attention 开销
+        prefill_self_attention = 0  # prefill self-attention 开销
+        total_kv_cache = 0  # 所有请求的总 KV cache
+        total_computed_tokens_sum = 0  # 所有请求的总已计算 token
+
+        for i, chunk_size in enumerate(chunk_sizes):
+            cached = all_cached_tokens[i]
+            computed = all_computed_tokens[i]
+            total_kv_cache += cached
+            total_computed_tokens_sum += computed
+
+            if chunk_size == 1:
+                decode_count += 1
+                decode_total_kv_cache += cached
+                decode_total_computed += computed
+            else:
+                num_prefill_reqs += 1
+                prefill_total_tokens += chunk_size
+                if chunk_size > prefill_max_tokens:
+                    prefill_max_tokens = chunk_size
+                if chunk_size < prefill_min_tokens:
+                    prefill_min_tokens = chunk_size
+                prefill_total_kv_cache += cached
+                prefill_attention_cost += chunk_size * (cached + chunk_size)
+                prefill_kv_product += chunk_size * cached
+                prefill_self_attention += chunk_size * chunk_size
+
+        # 无 prefill 请求时，min 设为 0
+        if num_prefill_reqs == 0:
+            prefill_min_tokens = 0
+
+        # 特征元组
+        # 顺序必须与 self.feature_names 完全一致
+        x = (
+            decode_total_kv_cache,
+            decode_total_computed,
+            num_prefill_reqs,
+            prefill_total_tokens,
+            prefill_max_tokens,
+            prefill_min_tokens,
+            prefill_total_kv_cache,
+            prefill_attention_cost,
+            prefill_kv_product,
+            prefill_self_attention,
+            total_scheduled_tokens,
+            total_kv_cache,
+            total_computed_tokens_sum,
+            decode_count
+            * prefill_total_tokens,  # decode_prefill_interaction（混合 batching 交互项）
+        )
+
+        # ===== 手写多项式展开 + 点积运算 =====
+        # 将展开和点积融合为单次循环，避免中间数组分配
+        result = self._combined_intercept  # 从截距开始累加
+        coef = self._combined_coef  # 合并后的系数数组
+        n_features = len(x)  # 特征数量（动态获取）
+        idx = 0  # 系数索引
+
+        # 线性项: x[0], x[1], ..., x[n_features-1]
+        for i in range(n_features):
+            result += x[i] * coef[idx]
+            idx += 1
+
+        # 二次项: x[i] * x[j]，其中 i <= j（仅当 degree >= 2 时）
+        # 包括平方项（i==j）和交叉项（i<j）
+        if self.degree >= 2:
+            for i in range(n_features):
+                xi = x[i]
+                for j in range(i, n_features):
+                    result += xi * x[j] * coef[idx]
+                    idx += 1
+
+        return result
 
 
 __all__ = [
     "DurationPredictor",
-    "extract_features",
-    "prepare_dataset",
 ]

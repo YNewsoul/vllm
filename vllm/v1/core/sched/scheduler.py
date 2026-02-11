@@ -184,46 +184,43 @@ class Scheduler(SchedulerInterface):
         self._initialize()
 
     def _initialize(self):
-
-        # Profiling相关设置
-        self.enable_profiling = os.getenv('VLLM_ENABLE_SCHEDULER_PROFILING',
-                                          'false').lower() == 'true'
-        profiling_log_dir = os.getenv('VLLM_SCHEDULER_PROFILING_LOG',
-                                      'profiling')
-        date_dir = os.path.join(profiling_log_dir,
-                                datetime.now().strftime("%Y-%m-%d"))
-        os.makedirs(date_dir, exist_ok=True)
-        formatted_time = datetime.now().strftime("%Y-%m-%d %H_%M_%S")
-
-        self.profiling_log_file = os.path.join(
-            date_dir, f"profiling_{formatted_time}.jsonl")
-        if self.enable_profiling and self.profiling_log_file:
+        # Batch tracking
+        self.batch_id = 0
+        self.last_sched_end_time: Optional[float] = None
+        self.batch_profiling_data: Optional[dict] = None
+        self.batch_rl_data: dict = {}
+        
+        # Profiling setup - only create directories if enabled
+        self.enable_profiling = os.getenv(
+            'VLLM_ENABLE_SCHEDULER_PROFILING', 'false').lower() == 'true'
+        self.profiling_log_file: Optional[str] = None
+        self._profiling_queue: Optional[Queue[Optional[str]]] = None
+        self._profiling_writer_stop: Optional[threading.Event] = None
+        self._profiling_writer_thread: Optional[threading.Thread] = None
+        
+        if self.enable_profiling:
+            now = datetime.now()
+            profiling_log_dir = os.getenv(
+                'VLLM_SCHEDULER_PROFILING_LOG', 'profiling')
+            date_dir = os.path.join(profiling_log_dir, now.strftime("%Y-%m-%d"))
+            os.makedirs(date_dir, exist_ok=True)
+            self.profiling_log_file = os.path.join(
+                date_dir, f"profiling_{now.strftime('%Y-%m-%d %H_%M_%S')}.jsonl")
             logger.info("The profiling log file: %s", self.profiling_log_file)
-            # Profiling writer thread and queue
-            self._profiling_queue: Queue[Optional[str]] = Queue()
+            self._profiling_queue = Queue()
             self._profiling_writer_stop = threading.Event()
-            self._profiling_writer_thread: Optional[threading.Thread] = None
             self._start_profiling_writer_thread()
 
-        self.batch_id = 0
-        self.last_sched_end_time: Optional[
-            float] = None  # 记录调度完成时间，用于计算model run时间
-        self.batch_profiling_data: Optional[dict] = None  # 当前batch的profiling数据
-        self.batch_rl_data: Optional[dict] = {}  # 当前batch的RL数据，用于log和SLA调度
-
-        # 初始化 RL 调度
+        # SLO scheduler setup
         self.slo_scheduler = None
-        VLLM_SLO_SCHEDULER_ENABLED = os.getenv('VLLM_SLO_SCHEDULER_ENABLED',
-                                               'false').lower() == 'true'
-        if SLO_SCHEDULER_AVAILABLE and VLLM_SLO_SCHEDULER_ENABLED:
+        self.use_rl_schedule = False
+        if SLO_SCHEDULER_AVAILABLE and os.getenv(
+                'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true':
             try:
                 self.slo_scheduler = SLOScheduler()
                 logger.info("SLO Scheduler initialized successfully!")
             except Exception as e:
                 logger.warning("SLO Scheduler initialization failed: %s", e)
-                self.slo_scheduler = None
-
-        self.use_rl_schedule = False
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -1238,53 +1235,48 @@ class Scheduler(SchedulerInterface):
                                     num_scheduled_tokens: dict[str, int],
                                     total_num_scheduled_tokens: int,
                                     token_budget: float) -> None:
-        """准备调度profiling信息，但不写入文件（等待model run完成）,记录的是做这一次iteration调度，数据的变化"""
-
-        # 按照RUNNING队列的严格顺序记录profiling数据
-        chunk_sizes = []
-        num_computed_tokens = []
-        num_cached_tokens = []
-        ttft = []
-        ttft_slo = []
-        remaining_ttft = []
-        meet_ttft = []
-        tpot = []
-        decode_tokens = []
-        max_tokens = []
-
-        request_data_id = []
-        ttft_time = []
-
+        """Prepare scheduling profiling info without writing to file."""
         now_time = time.time()
+        running = self.running
+        n = len(running)
+        
+        # Pre-allocate lists for better performance
+        chunk_sizes = [0] * n
+        computed_tokens = [0] * n
+        cached_tokens = [0] * n
+        ttft_list = [None] * n
+        ttft_slo_list = [0.0] * n
+        ttft_time_list = [None] * n
+        remaining_ttft = [None] * n
+        meet_ttft = [None] * n
+        tpot = [None] * n
+        decode_tokens = [None] * n
+        max_tokens_list = [0] * n
+        request_data_id = [None] * n
 
-        # 遍历RUNNING队列，只记录本步被调度的请求，保持队列顺序
-        for req in self.running:
-            req_tokens = num_scheduled_tokens[req.request_id]
-            chunk_sizes.append(req_tokens)
-            num_computed_tokens.append(req.num_computed_tokens)
-            num_cached_tokens.append(req.num_cached_tokens)
-            ttft_slo.append(req.ttft_slo)
-            if req.ttft is not None:
-                ttft.append(f"{req.ttft:.3f}")
-                meet_ttft.append("T" if req.ttft <= req.ttft_slo else "F")
-                remaining_ttft.append(None)
+        # Single pass through running queue
+        for i, req in enumerate(running):
+            chunk_sizes[i] = num_scheduled_tokens[req.request_id]
+            computed_tokens[i] = req.num_computed_tokens
+            cached_tokens[i] = req.num_cached_tokens
+            ttft_slo_list[i] = req.ttft_slo
+            max_tokens_list[i] = req.max_tokens
+            request_data_id[i] = req.request_data_id
+            
+            req_ttft = req.ttft
+            if req_ttft is not None:
+                ttft_list[i] = f"{req_ttft:.3f}"
+                meet_ttft[i] = "T" if req_ttft <= req.ttft_slo else "F"
                 decode_token = req.num_computed_tokens - req.num_prompt_tokens
-                decode_tokens.append(decode_token)
-                tpot.append(
-                    f"{(now_time - req.ttft_time)/decode_token*1000:.3f}"
-                    if decode_token > 0 else None)
-                ttft_time.append(f"{req.ttft_time:.3f}")
+                decode_tokens[i] = decode_token
+                req_ttft_time = req.ttft_time
+                ttft_time_list[i] = f"{req_ttft_time:.3f}"
+                if decode_token > 0:
+                    tpot[i] = f"{(now_time - req_ttft_time) / decode_token * 1000:.3f}"
             else:
-                ttft.append(req.ttft)
-                ttft_time.append(req.ttft_time)
-                meet_ttft.append(None)
-                remaining_ttft.append(
-                    f"{(req.ttft_slo - (now_time - req.arrival_time)):.3f}")
-                decode_tokens.append(None)
-                tpot.append(None)
-            max_tokens.append(req.max_tokens)
-            request_data_id.append(req.request_data_id)
-        # 准备统计信息（不包含model run时间）
+                ttft_time_list[i] = req.ttft_time
+                remaining_ttft[i] = f"{req.ttft_slo - (now_time - req.arrival_time):.3f}"
+
         self.batch_profiling_data = {
             "batch_id": self.batch_id,
             "time": f"{now_time:.3f}",
@@ -1293,19 +1285,19 @@ class Scheduler(SchedulerInterface):
             "sched_tokens": total_num_scheduled_tokens,
             "schedule_ms": f"{schedule_duration * 1000:.3f}",
             "num_waiting": len(self.waiting),
-            "num_running": len(self.running),
+            "num_running": n,
             "req_data_id": request_data_id,
             "chunk_sizes": chunk_sizes,
-            "computed_tokens": num_computed_tokens,
-            "cached_tokens": num_cached_tokens,
-            "ttft_time": ttft_time,
-            "ttft_slo": ttft_slo,
-            "ttft": ttft,
+            "computed_tokens": computed_tokens,
+            "cached_tokens": cached_tokens,
+            "ttft_time": ttft_time_list,
+            "ttft_slo": ttft_slo_list,
+            "ttft": ttft_list,
             "remaining_ttft": remaining_ttft,
             "meet_ttft": meet_ttft,
             "tpot": tpot,
             "decode_tokens": decode_tokens,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens_list,
         }
 
     def _finalize_and_log_profiling(self, model_run_duration: float) -> None:
