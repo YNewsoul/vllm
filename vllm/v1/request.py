@@ -93,6 +93,9 @@ class Request:
 
 
     def _set_other_attribute(self):
+        """
+        设置额外的属性，用于调度
+        """
         self.arrival_time = time.time()
         if self.sampling_params.extra_args:
             self.extra_data = self.sampling_params.extra_args.get('extra_data', None)
@@ -100,8 +103,10 @@ class Request:
                 self.arrival_time = self.extra_data.get('arrival_time', None)
                 self.ttft_slo = self.extra_data.get('ttft_slo', None)
                 self.request_data_id = self.extra_data.get('request_data_id', None)
+                self.tpot_type = self.extra_data.get('tpot_type', None)
         self.ttft = None
         self.ttft_time = None
+        self.accept = True
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":

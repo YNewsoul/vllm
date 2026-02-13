@@ -233,7 +233,7 @@ class Scheduler(SchedulerInterface):
 
         # 使用SLO调度器
         if self.slo_scheduler:
-            schedule_decision = self.slo_scheduler.compute_sched_decision(
+            schedule_decision = self.slo_scheduler.sched_decision(
                 self.get_schedule_state())
 
         token_budget = self.max_num_scheduled_tokens
@@ -259,8 +259,9 @@ class Scheduler(SchedulerInterface):
                               request.num_computed_tokens)
 
             if self.slo_scheduler and num_new_tokens > 1 and schedule_decision.get(
-                    'pure_decode', False):
+                    'decode_only', False):
                 # 纯解码，跳过prefill请求
+                req_index += 1
                 continue
 
             # 长预填充截断处理
@@ -388,7 +389,7 @@ class Scheduler(SchedulerInterface):
             while self.waiting and token_budget > 0:
 
                 if self.slo_scheduler and schedule_decision.get(
-                        'pure_decode', False):
+                        'decode_only', False):
                     # 纯解码，跳过prefill请求
                     break
                 if len(self.running) == self.max_num_running_reqs:
