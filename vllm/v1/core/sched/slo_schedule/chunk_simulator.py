@@ -2,17 +2,18 @@
 LLM chunk prefill/decoding 调度仿真
 """
 
-import time
 from collections import deque, namedtuple
 from dataclasses import dataclass
 from typing import Deque, List, Optional, Tuple
 
-# 导入时长预测器，用于预测每次 iteration 的执行时间
-from chunk_predictor import DurationPredictor
+try:
+    from chunk_predictor import DurationPredictor
+except ImportError:
+    from .chunk_predictor import DurationPredictor
 
-# RequestSnapshot - 请求快照（不可变的命名元组）
-RequestSnapshot = namedtuple(
-    "RequestSnapshot",
+# ReqSnapshot - 请求快照（不可变的命名元组）
+ReqSnapshot = namedtuple(
+    "ReqSnapshot",
     [
         "request_id",  # 请求唯一标识符
         "num_computed_tokens",  # 已计算的 token 数量（包括 prefill 和 decode）
@@ -23,13 +24,17 @@ RequestSnapshot = namedtuple(
         "max_tokens",  # 允许生成的最大 token 数量（不含 prompt）
         "ttft",  # 实际的 TTFT 值（首 token 生成时间）
         "finish_time",  # 请求完成时间（保留字段）
+        "tpot_type",
+        "tpot_slo",
+        "accept",
+        "ttft_time",
     ],
 )
 
 
-# RequestState - 请求运行时状态（可变的数据类）
+# ReqState - 请求运行时状态（可变的数据类）
 @dataclass(slots=True)
-class RequestState:
+class ReqState:
     """
     请求运行时状态
     """
@@ -43,9 +48,13 @@ class RequestState:
     num_cached_tokens: int = 0  # 已缓存的 token 数
     ttft: Optional[float] = None  # 实际 TTFT 值
     finish_time: Optional[float] = None  # 请求完成时间（保留字段）
+    tpot_type: Optional[str] = None  # TPOT 类型
+    tpot_slo: Optional[float] = None  # TPOT SLO 约束
+    accept: Optional[bool] = None  # 是否被接受
+    ttft_time: Optional[float] = None  # 首token输出时间
 
     @classmethod
-    def from_snapshot(cls, snap: RequestSnapshot) -> "RequestState":
+    def from_snapshot(cls, snap: ReqSnapshot) -> "ReqState":
         """
         从快照创建运行时状态
         """
@@ -59,13 +68,17 @@ class RequestState:
             num_cached_tokens=snap.num_cached_tokens,
             ttft=snap.ttft,
             finish_time=snap.finish_time,
+            tpot_type=snap.tpot_type,
+            tpot_slo=snap.tpot_slo,
+            accept=snap.accept,
+            ttft_time=snap.ttft_time,
         )
 
-    def to_snapshot(self) -> RequestSnapshot:
+    def to_snapshot(self) -> ReqSnapshot:
         """
         将运行时状态转换为快照
         """
-        return RequestSnapshot(
+        return ReqSnapshot(
             self.request_id,
             self.num_computed_tokens,
             self.num_cached_tokens,
@@ -75,13 +88,17 @@ class RequestState:
             self.max_tokens,
             self.ttft,
             self.finish_time,
+            self.tpot_type,
+            self.tpot_slo,
+            self.accept,
+            self.ttft_time,
         )
 
-    def phase(self) -> str:
+    def phase(self) -> int:
         if self.is_finished():
-            return "finished"
+            return 3
         return (
-            "prefill" if self.num_computed_tokens < self.num_prompt_tokens else "decode"
+            0 if self.num_computed_tokens < self.num_prompt_tokens else 1
         )
 
     def is_finished(self) -> bool:
@@ -89,34 +106,9 @@ class RequestState:
         return self.num_computed_tokens >= target_total
 
 
-# IterationTiming - 单次 iteration 的耗时记录
+# IteraSnapshot - 单次 iteration 的快照记录
 @dataclass
-class IterationTiming:
-    """
-    记录单次 iteration 各阶段的耗时信息（毫秒）
-    """
-
-    iteration: int  # iteration 序号
-    phase_classify_ms: float  # 阶段分类耗时
-    decode_select_ms: float  # decode 请求分配耗时
-    prefill_select_ms: float  # prefill 请求分配耗时
-    waiting_select_ms: float  # waiting 请求分配耗时
-    record_build_ms: float  # 记录构建耗时
-    predict_ms: float  # 预测耗时
-    predict_cache_hit: bool  # 预测是否命中缓存
-    snapshot_build_ms: float  # 快照构建耗时
-    state_update_ms: float  # 状态更新耗时
-    cleanup_ms: float  # 清理耗时
-    iter_total_ms: float  # 本次 iteration 总耗时
-    num_scheduled: int  # 本次调度的请求数
-    num_decode: int  # decode 阶段请求数
-    num_prefill: int  # prefill 阶段请求数
-    num_waiting: int  # waiting 队列剩余数
-
-
-# IterationSnapshot - 单次 iteration 的快照记录
-@dataclass
-class IterationSnapshot:
+class IteraSnapshot:
     """
     记录单次 iteration（调度周期）的详细信息
     """
@@ -140,13 +132,11 @@ class SimulationResult:
     仿真运行结果
     """
 
-    history: List[IterationSnapshot]  # iteration 历史快照列表
-    final_running: List[RequestSnapshot]  # 最终 running 队列快照
-    final_waiting: List[RequestSnapshot]  # 最终 waiting 队列快照
-    timing_history: List[IterationTiming]  # 各 iteration 耗时记录
-    finished: List[RequestSnapshot]  # 已完成请求快照列表
-    final_iteration: int  # 最终 iteration 序号
-    current_time: float  # 最终仿真时间（秒）
+    history: List[IteraSnapshot]  # iteration 历史快照列表
+    final_running: List[ReqSnapshot]  # 最终 running 队列快照
+    final_waiting: List[ReqSnapshot]  # 最终 waiting 队列快照
+    finished: List[ReqSnapshot]  # 已完成请求快照列表
+    end_time: float  # 最终仿真时间（秒）
 
 
 class ChunkSimulator:
@@ -156,21 +146,22 @@ class ChunkSimulator:
 
     def __init__(
         self,
-        predictor: DurationPredictor,
-        enable_decode_cache: bool = False,
+        predictor: DurationPredictor = None,
+        decode_cache: bool = True,
+        profiling: bool = False,
     ):
         self.predictor = predictor
-        self.enable_decode_cache = enable_decode_cache
+        self.decode_cache = decode_cache
+        self.profiling = profiling
 
     def run(
         self,
-        running_requests: List[RequestSnapshot],
-        waiting_requests: List[RequestSnapshot],
-        max_iters: int,
+        running_reqs: List[ReqSnapshot],
+        waiting_reqs: List[ReqSnapshot],
+        max_iters: int = 1000,
         start_time: float = 0.0,
         token_budget: int = 2048,
-        limit_token_budget: Optional[int] = None,
-        compare_mode: bool = False,
+        decode_only: bool = False,
     ) -> "SimulationResult":
         """
         运行仿真，返回 SimulationResult 对象。
@@ -189,87 +180,65 @@ class ChunkSimulator:
 
         """
         current_time = start_time
-        history: List[IterationSnapshot] = []
-        timing_history: List[IterationTiming] = []  # 耗时记录列表
+        history: List[IteraSnapshot] = []
 
         # 用于缓存纯 decode iteration 的预测结果（优化性能）
         _last_decode_ms: Optional[float] = None
         _last_decode_reqs: Optional[int] = None
 
         # waiting 队列
-        waiting: Deque[RequestSnapshot] = deque(waiting_requests)
+        waiting: Deque[ReqSnapshot] = deque(waiting_reqs)
         # running 队列直接转换为 RequestState（可变状态）
-        running: List[RequestState] = [
-            RequestState.from_snapshot(snap) for snap in running_requests
+        running: List[ReqState] = [
+            ReqState.from_snapshot(snap) for snap in running_reqs
         ]
         # 已完成请求列表
-        finished: List[RequestSnapshot] = []
+        finished: List[ReqSnapshot] = []
         # =====================================================================
         # 主循环：每次循环代表一次 iteration
         # =====================================================================
-        final_iteration = 0
         for iteration in range(max_iters):
-            iter_t0 = time.perf_counter()
 
-            if compare_mode and limit_token_budget <= 0:
-                # 对比模式下，prefill tokens有约束
-                break
             # =================================================================
             # 步骤 1：一次性区分 running 队列中的 decode 和 prefill 请求
             # =================================================================
-            phase_classify_t0 = time.perf_counter()
-            decode_reqs: List[RequestState] = []  # decode 阶段的请求
-            prefill_reqs: List[RequestState] = []  # prefill 阶段的请求
+            decode_reqs: List[ReqState] = []  # decode 阶段的请求
+            prefill_reqs: List[ReqState] = []  # prefill 阶段的请求
             for req in running:
                 phase = req.phase()
-                if phase == "decode":
+                if phase == 1:
                     decode_reqs.append(req)
-                elif phase == "prefill":
+                elif phase == 0:
                     prefill_reqs.append(req)
-            phase_classify_ms = round(
-                (time.perf_counter() - phase_classify_t0) * 1000, 4
-            )
 
             remaining_budget = token_budget
-            assignments: List[Tuple[RequestState, int]] = []  # 记录调度分配
+            assignments: List[Tuple[ReqState, int]] = []  # 记录调度分配
 
             # =================================================================
             # 步骤 2：按优先级分配 token budget
             # =================================================================
 
             # 第一优先级：分配给 running 队列的 decode 请求
-            decode_t0 = time.perf_counter()
             for req in decode_reqs:
                 assignments.append((req, 1))
                 remaining_budget -= 1
-            decode_select_ms = round((time.perf_counter() - decode_t0) * 1000, 4)
 
             # 第二优先级：分配给 running 队列的 prefill 请求（FCFS）
-            if limit_token_budget is not None:
-                if iteration == 0:
-                    # 第一次 iteration，prefill 预算减去 decode 请求的数量
-                    limit_token_budget -= len(decode_reqs)
-                remaining_budget = min(remaining_budget, limit_token_budget)
-            prefill_t0 = time.perf_counter()
             for req in prefill_reqs:
-                if remaining_budget <= 0:
+                if remaining_budget <= 0 or decode_only:
                     break
                 chunk = min(
                     req.num_prompt_tokens - req.num_computed_tokens, remaining_budget
                 )
                 assignments.append((req, chunk))
                 remaining_budget -= chunk
-                if limit_token_budget is not None:
-                    limit_token_budget -= chunk
-            prefill_select_ms = round((time.perf_counter() - prefill_t0) * 1000, 4)
 
             # 第三优先级：分配给 waiting 队列的请求（FCFS）
-            waiting_t0 = time.perf_counter()
-            newly_scheduled_from_waiting: List[RequestState] = []
             while waiting and remaining_budget > 0:
-
+                if decode_only:
+                    break
                 snap = waiting.popleft()
-                new_req = RequestState.from_snapshot(snap)
+                new_req = ReqState.from_snapshot(snap)
 
                 chunk = min(
                     new_req.num_prompt_tokens - new_req.num_computed_tokens,
@@ -278,19 +247,14 @@ class ChunkSimulator:
 
                 assignments.append((new_req, chunk))
                 remaining_budget -= chunk
-                if limit_token_budget is not None:
-                    limit_token_budget -= chunk
 
                 running.append(new_req)
-                newly_scheduled_from_waiting.append(new_req)
-            waiting_select_ms = round((time.perf_counter() - waiting_t0) * 1000, 4)
 
             if not assignments:
                 break
             # =================================================================
             # 步骤 3：记录调度信息，用于时长预测
             # =================================================================
-            record_build_t0 = time.perf_counter()
             chunk_sizes: List[int] = []
             all_computed_tokens: List[int] = []
             all_cached_tokens: List[int] = []
@@ -300,32 +264,25 @@ class ChunkSimulator:
                 all_cached_tokens.append(req.num_cached_tokens)
 
             # 统计running队列中未被调度的请求数量
-            num_unscheduled_running = (
-                len(decode_reqs) + len(prefill_reqs) - len(assignments)
-            )
+            num_unscheduled_running = max(0, len(decode_reqs) + len(prefill_reqs) - len(assignments))
             num_waiting_reqs = len(waiting)
 
             # 计算总调度 token 数
             total_scheduled_tokens = sum(chunk_sizes)
             num_running = len(assignments)
-            record_build_ms = round((time.perf_counter() - record_build_t0) * 1000, 4)
 
             # =================================================================
             # 步骤 4：预测 iteration 执行时长
             # =================================================================
-
-            predict_t0 = time.perf_counter()
-            pure_decode = True if total_scheduled_tokens == num_running else False
+            pure_decode = (total_scheduled_tokens == num_running)
             if (
-                self.enable_decode_cache
+                self.decode_cache
                 and pure_decode
                 and _last_decode_ms is not None
                 and _last_decode_reqs == num_running
             ):
                 # 复用缓存的预测结果（纯 decode 且运行请求数相同）
                 duration_ms = _last_decode_ms
-                predict_ms = 0.0
-                cache_hit = True
             else:
                 # 调用预测器进行预测（使用完全内联的极速方法）
                 duration_ms = float(
@@ -336,35 +293,30 @@ class ChunkSimulator:
                         total_scheduled_tokens=total_scheduled_tokens,
                     )
                 )
-                cache_hit = False
                 # 更新缓存
-                if self.enable_decode_cache and pure_decode:
+                if self.decode_cache and pure_decode:
                     _last_decode_ms = duration_ms
                     _last_decode_reqs = num_running
                 else:
                     _last_decode_ms = None
                     _last_decode_reqs = None
-            predict_ms = round((time.perf_counter() - predict_t0) * 1000, 4)
 
-            # 记录 iteration 快照
-            snapshot_build_t0 = time.perf_counter()
-            history.append(
-                IterationSnapshot(
-                    iteration=iteration,
-                    current_time=current_time,
-                    total_scheduled_tokens=total_scheduled_tokens,
-                    chunk_sizes=chunk_sizes,
-                    all_cached_tokens=all_cached_tokens,
-                    all_computed_tokens=all_computed_tokens,
-                    num_waiting_reqs=num_waiting_reqs,
-                    duration_ms=duration_ms,
-                    num_unscheduled_running=num_unscheduled_running,
-                    scheduled_request_ids=[req.request_id for req, _ in assignments],
+            # 记录 iteration 快照（仅在 profiling 模式下记录）
+            if self.profiling:
+                history.append(
+                    IteraSnapshot(
+                        iteration=iteration,
+                        current_time=current_time,
+                        total_scheduled_tokens=total_scheduled_tokens,
+                        chunk_sizes=chunk_sizes,
+                        all_cached_tokens=all_cached_tokens,
+                        all_computed_tokens=all_computed_tokens,
+                        num_waiting_reqs=num_waiting_reqs,
+                        duration_ms=duration_ms,
+                        num_unscheduled_running=num_unscheduled_running,
+                        scheduled_request_ids=[req.request_id for req, _ in assignments],
+                    )
                 )
-            )
-            snapshot_build_ms = round(
-                (time.perf_counter() - snapshot_build_t0) * 1000, 4
-            )
 
             # =================================================================
             # 步骤 5：更新仿真时间轴
@@ -374,16 +326,14 @@ class ChunkSimulator:
             # =================================================================
             # 步骤 6：更新请求状态
             # =================================================================
-            state_update_t0 = time.perf_counter()
             for req, chunk in assignments:
                 req.num_computed_tokens += chunk
                 # 关键：当 prefill 完成（进入 decode 阶段）时记录 TTFT
-                if chunk == 1 and req.ttft is None:
+                if req.ttft is None and req.num_computed_tokens > req.num_prompt_tokens:
                     req.ttft = current_time - req.arrival_time
-            state_update_ms = round((time.perf_counter() - state_update_t0) * 1000, 4)
+                    req.ttft_time = current_time
 
             # 清理已完成请求，并记录完成时间
-            cleanup_t0 = time.perf_counter()
             still_running = []
             for req in running:
                 if req.is_finished():
@@ -393,33 +343,6 @@ class ChunkSimulator:
                 else:
                     still_running.append(req)
             running = still_running
-            cleanup_ms = round((time.perf_counter() - cleanup_t0) * 1000, 4)
-
-            iter_total_ms = round((time.perf_counter() - iter_t0) * 1000, 4)
-
-            # 记录耗时信息
-            timing_history.append(
-                IterationTiming(
-                    iteration=iteration,
-                    phase_classify_ms=phase_classify_ms,
-                    decode_select_ms=decode_select_ms,
-                    prefill_select_ms=prefill_select_ms,
-                    waiting_select_ms=waiting_select_ms,
-                    record_build_ms=record_build_ms,
-                    predict_ms=predict_ms,
-                    predict_cache_hit=cache_hit,
-                    snapshot_build_ms=snapshot_build_ms,
-                    state_update_ms=state_update_ms,
-                    cleanup_ms=cleanup_ms,
-                    iter_total_ms=iter_total_ms,
-                    num_scheduled=len(assignments),
-                    num_decode=len(decode_reqs),
-                    num_prefill=len(prefill_reqs),
-                    num_waiting=len(waiting),
-                )
-            )
-
-            final_iteration = iteration
 
         # =====================================================================
         # 返回最终状态
@@ -428,10 +351,8 @@ class ChunkSimulator:
             history=history,
             final_running=[req.to_snapshot() for req in running],
             final_waiting=list(waiting),
-            timing_history=timing_history,
             finished=finished,
-            final_iteration=final_iteration,
-            current_time=current_time,
+            end_time=current_time,
         )
 
 
@@ -439,10 +360,9 @@ class ChunkSimulator:
 # 模块导出
 # ============================================================================
 __all__ = [
-    "RequestSnapshot",  # 请求快照（不可变）
-    "RequestState",  # 请求运行时状态（可变）
-    "IterationSnapshot",  # iteration 快照
-    "IterationTiming",  # iteration 耗时记录
+    "ReqSnapshot",  # 请求快照（不可变）
+    "ReqState",  # 请求运行时状态（可变）
+    "IteraSnapshot",  # iteration 快照
     "SimulationResult",  # 仿真结果
     "ChunkSimulator",  # 仿真器主类
 ]
