@@ -196,7 +196,6 @@ class Scheduler(SchedulerInterface):
 
         # SLO调度器设置
         self.slo_scheduler = None
-        self.use_rl_schedule = False
         if SLO_SCHEDULER_AVAILABLE and os.getenv(
                 'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true':
             try:
@@ -204,6 +203,7 @@ class Scheduler(SchedulerInterface):
                 logger.info("SLO Scheduler initialized successfully!")
             except Exception as e:
                 logger.warning("SLO Scheduler initialization failed: %s", e)
+        self.slo_sched = False
 
     def schedule(self) -> SchedulerOutput:
         # 注意(woosuk)关于调度算法：
@@ -231,12 +231,13 @@ class Scheduler(SchedulerInterface):
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {}  # 记录每个请求已调度的token数
 
+        token_budget = self.max_num_scheduled_tokens
         # 使用SLO调度器
         if self.slo_scheduler:
             schedule_decision = self.slo_scheduler.sched_decision(
                 self.get_schedule_state())
-
-        token_budget = self.max_num_scheduled_tokens
+            token_budget = schedule_decision['token_budget']
+            self.slo_sched = schedule_decision['slo_sched']
 
         init_token_budget = token_budget
 
@@ -787,8 +788,10 @@ class Scheduler(SchedulerInterface):
         model_run_duration = time.time() - self.last_sched_end_time
 
         # Profiling数据记录
+        # if self.enable_profiling and self.slo_sched:
         if self.enable_profiling:
             self._finalize_and_log_profiling(model_run_duration)
+        self.slo_sched = False
 
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
@@ -1179,55 +1182,66 @@ class Scheduler(SchedulerInterface):
                                     token_budget: float) -> None:
         """准备调度profiling信息，不写入文件。"""
         now_time = time.time()
-        running = self.running
-        n = len(running)
-        
-        # 预分配列表大小以获得更好的性能
-        chunk_sizes = [0] * n
-        computed_tokens = [0] * n
-        cached_tokens = [0] * n
-        ttft_list = [None] * n
-        ttft_slo_list = [0.0] * n
-        ttft_time_list = [None] * n
-        remaining_ttft = [None] * n
-        meet_ttft = [None] * n
-        tpot = [None] * n
-        decode_tokens = [None] * n
-        max_tokens_list = [0] * n
-        request_data_id = [None] * n
+        # 仅记录当前step中被调度的请求，避免running中未调度请求触发KeyError。
+        scheduled_running = [
+            req for req in self.running if req.request_id in num_scheduled_tokens
+        ]
 
-        # 单次遍历running队列
-        for i, req in enumerate(running):
-            chunk_sizes[i] = num_scheduled_tokens[req.request_id]
-            computed_tokens[i] = req.num_computed_tokens
-            cached_tokens[i] = req.num_cached_tokens
-            ttft_slo_list[i] = req.ttft_slo
-            max_tokens_list[i] = req.max_tokens
-            request_data_id[i] = req.request_data_id
-            
+        chunk_sizes: list[int] = []
+        computed_tokens: list[int] = []
+        cached_tokens: list[int] = []
+        ttft_list: list[Optional[str]] = []
+        ttft_slo_list: list[float] = []
+        ttft_time_list: list[Optional[str]] = []
+        remaining_ttft: list[Optional[str]] = []
+        meet_ttft: list[Optional[str]] = []
+        tpot: list[Optional[str]] = []
+        decode_tokens: list[Optional[int]] = []
+        max_tokens_list: list[int] = []
+        request_data_id: list[Optional[int]] = []
+
+        # 单次遍历本轮被调度请求
+        for req in scheduled_running:
+            chunk_sizes.append(num_scheduled_tokens[req.request_id])
+            computed_tokens.append(req.num_computed_tokens)
+            cached_tokens.append(req.num_cached_tokens)
+            ttft_slo_list.append(req.ttft_slo)
+            max_tokens_list.append(req.max_tokens)
+            request_data_id.append(req.request_data_id)
+
             req_ttft = req.ttft
             if req_ttft is not None:
-                ttft_list[i] = f"{req_ttft:.3f}"
-                meet_ttft[i] = "T" if req_ttft <= req.ttft_slo else "F"
+                ttft_list.append(f"{req_ttft:.3f}")
+                meet_ttft.append("T" if req_ttft <= req.ttft_slo else "F")
                 decode_token = req.num_computed_tokens - req.num_prompt_tokens
-                decode_tokens[i] = decode_token
+                decode_tokens.append(decode_token)
                 req_ttft_time = req.ttft_time
-                ttft_time_list[i] = f"{req_ttft_time:.3f}"
+                ttft_time_list.append(f"{req_ttft_time:.3f}")
+                remaining_ttft.append(None)
                 if decode_token > 0:
-                    tpot[i] = f"{(now_time - req_ttft_time) / decode_token * 1000:.3f}"
+                    tpot.append(
+                        f"{(now_time - req_ttft_time) / decode_token * 1000:.3f}")
+                else:
+                    tpot.append(None)
             else:
-                ttft_time_list[i] = req.ttft_time
-                remaining_ttft[i] = f"{req.ttft_slo - (now_time - req.arrival_time):.3f}"
+                ttft_list.append(None)
+                ttft_time_list.append(req.ttft_time)
+                remaining_ttft.append(
+                    f"{req.ttft_slo - (now_time - req.arrival_time):.3f}")
+                meet_ttft.append(None)
+                tpot.append(None)
+                decode_tokens.append(None)
 
         self.batch_profiling_data = {
             "batch_id": self.batch_id,
             "time": f"{now_time:.3f}",
             "token_budget": token_budget,
-            "rl_sched": self.use_rl_schedule,
             "sched_tokens": total_num_scheduled_tokens,
+            "slo_sched": self.slo_sched,
             "schedule_ms": f"{schedule_duration * 1000:.3f}",
             "num_waiting": len(self.waiting),
-            "num_running": n,
+            "num_running": len(self.running),
+            "num_scheduled": len(chunk_sizes),
             "req_data_id": request_data_id,
             "chunk_sizes": chunk_sizes,
             "computed_tokens": computed_tokens,
@@ -1249,19 +1263,16 @@ class Scheduler(SchedulerInterface):
         self.batch_profiling_data[
             "model_run_ms"] = f"{model_run_duration * 1000:.3f}"
 
-        if self.use_rl_schedule or self.rl_scheduler is None:
-            # 写入日志文件
-            try:
-                payload = json.dumps(self.batch_profiling_data,
-                                     ensure_ascii=False)
-                if self._profiling_writer_thread:
-                    self._profiling_queue.put(payload)
-                else:
-                    logger.warning("Failed to write profiling data")
-                    # with open(self.profiling_log_file,'a',encoding='utf-8') as f:
-                    #     f.write(payload + '\n')
-            except Exception as e:
-                logger.warning("Failed to write profiling data: %s", e)
+        # 写入日志文件
+        try:
+            payload = json.dumps(self.batch_profiling_data,
+                                    ensure_ascii=False)
+            if self._profiling_writer_thread:
+                self._profiling_queue.put(payload)
+            else:
+                logger.warning("Failed to write profiling data")
+        except Exception as e:
+            logger.warning("Failed to write profiling data: %s", e)
 
         self.batch_id += 1
 

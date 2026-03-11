@@ -18,10 +18,12 @@ logger = logging.getLogger(__name__)
 try:
     from .chunk_predictor import DurationPredictor
     from .chunk_simulator import ChunkSimulator, ReqSnapshot
+    from .random_chunker import RandomChunker
     from .config import SloSchedulerConfig
 except ImportError:
     from chunk_predictor import DurationPredictor
     from chunk_simulator import ChunkSimulator, ReqSnapshot
+    from random_chunker import RandomChunker
     from config import SloSchedulerConfig
 
 def convert_req_to_snapshot(req: Any) -> ReqSnapshot:
@@ -56,33 +58,36 @@ class SLOScheduler:
         self.config = SloSchedulerConfig.from_env()
 
         self.model = self.config.model
+        self.fixed_chunk_size = self.config.fixed_chunk_size
         self.max_num_scheduled_tokens = max_num_scheduled_tokens
 
-        model_path = os.path.join("models", self.model)
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(current_dir, "models", self.model)
         self.predictor = DurationPredictor.load(model_path)
         self.simulator = ChunkSimulator(predictor=self.predictor)
+        self.random_chunker = RandomChunker()
 
     def sched_decision(self, sched_state: dict) -> dict:
         timing = {}  # record elapsed time for each step
         total_start = time.perf_counter()
 
         sched_decision = {"decode_only": False,
-                          "token_budget": self.max_num_scheduled_tokens}
+                          "token_budget": self.max_num_scheduled_tokens,
+                          "slo_sched": False}
 
         running = sched_state['running']
         waiting = sched_state['waiting']
 
-        # Step 1: schedule estimate
+        # Step 1: 判断是否需要调度
         t0 = time.perf_counter()
         need_schedule = self._schedule_estimate(running, waiting)
         timing['schedule_estimate'] = time.perf_counter() - t0
 
         if not need_schedule:
             timing['total'] = time.perf_counter() - total_start
-            self._print_timing(timing, sched_decision)
             return sched_decision
 
-        # Step 2: convert requests to snapshots
+        # Step 2: 将 running 和 waiting 请求转换为 ReqSnapshot
         t0 = time.perf_counter()
         running_snapshots = [
             convert_req_to_snapshot(req)
@@ -94,9 +99,18 @@ class SLOScheduler:
         ]
         timing['convert_snapshot'] = time.perf_counter() - t0
 
+        # Step 3: 是否随机chunk
+        if self.random_chunker.enabled:
+            return self.random_chunker.random_from_list()
         current_time = sched_state['current_time']
 
-        # Step 3: batch_forward (with internal timing)
+        # Step 4: 是否固定chunk size
+        if self.fixed_chunk_size > 0:
+            sched_decision["token_budget"] = self.fixed_chunk_size
+            sched_decision["slo_sched"] = True
+            return sched_decision
+        
+        # Step 5: 进行slo调度
         t0 = time.perf_counter()
         sched_decision["decode_only"], forward_timing = self.batch_forward(
             running_snapshots, waiting_snapshots, current_time
@@ -105,16 +119,8 @@ class SLOScheduler:
         timing.update(forward_timing)
 
         timing['total'] = time.perf_counter() - total_start
-        self._print_timing(timing, sched_decision)
+        sched_decision["slo_sched"] = True
         return sched_decision
-
-    @staticmethod
-    def _print_timing(timing: dict, decision: dict):
-        """Print elapsed time for each step in sched_decision."""
-        lines = ["[SLOScheduler Timing] decision=%s" % decision]
-        for key, value in timing.items():
-            lines.append("  %-30s: %.6f s (%.3f ms)" % (key, value, value * 1000))
-        logger.info("\n".join(lines))
 
     def _schedule_estimate(self, running: list, waiting: list):
         """判断是否需要进行chunk size调整调度"""
