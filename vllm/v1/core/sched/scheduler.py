@@ -171,7 +171,6 @@ class Scheduler(SchedulerInterface):
         self.batch_id = 0
         self.last_sched_end_time: Optional[float] = None
         self.batch_profiling_data: Optional[dict] = None
-        self.batch_rl_data: dict = {}
         
         # Profiling设置 - 仅在启用时创建目录
         self.enable_profiling = os.getenv(
@@ -185,10 +184,12 @@ class Scheduler(SchedulerInterface):
             now = datetime.now()
             profiling_log_dir = os.getenv(
                 'VLLM_SCHEDULER_PROFILING_LOG', 'profiling')
+            profiling_log_filename = os.getenv(
+                'VLLM_SCHEDULER_PROFILING_LOG_FILENAME', f"profiling_{now.strftime('%Y-%m-%d %H_%M_%S')}.jsonl")
             date_dir = os.path.join(profiling_log_dir, now.strftime("%Y-%m-%d"))
             os.makedirs(date_dir, exist_ok=True)
             self.profiling_log_file = os.path.join(
-                date_dir, f"profiling_{now.strftime('%Y-%m-%d %H_%M_%S')}.jsonl")
+                date_dir, profiling_log_filename)
             logger.info("The profiling log file: %s", self.profiling_log_file)
             self._profiling_queue = Queue()
             self._profiling_writer_stop = threading.Event()
@@ -196,6 +197,8 @@ class Scheduler(SchedulerInterface):
 
         # SLO调度器设置
         self.slo_scheduler = None
+        logger.info("SLO Scheduler available: %s, enabled: %s", SLO_SCHEDULER_AVAILABLE, os.getenv(
+                'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true')
         if SLO_SCHEDULER_AVAILABLE and os.getenv(
                 'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true':
             try:
@@ -821,7 +824,8 @@ class Scheduler(SchedulerInterface):
             if request.ttft is None and num_tokens_scheduled == 1:
                 now_time = time.time()
                 request.ttft = now_time - request.arrival_time
-                request.ttft_time = now_time
+                if request.ttft < request.ttft_slo:
+                    request.safeguard = True
 
             # 获取请求在模型输出中的索引位置
             req_index = model_runner_output.req_id_to_index[req_id]
@@ -962,14 +966,6 @@ class Scheduler(SchedulerInterface):
             # 仅将统计信息返回给其中一个前端
             next(iter(engine_core_outputs.values())).scheduler_stats = (
                 self.make_stats(spec_decoding_stats))
-
-        # # 调整waiting队列顺序
-        # if len(self.waiting) > 1 :
-        #     self.waiting = adjust_waiting_seq(
-        #         self.waiting,
-        #         self.rl_env_info['select_token_budget'],
-        #         model_run_duration,
-        #     )
 
         return engine_core_outputs
 
@@ -1192,10 +1188,9 @@ class Scheduler(SchedulerInterface):
         cached_tokens: list[int] = []
         ttft_list: list[Optional[str]] = []
         ttft_slo_list: list[float] = []
-        ttft_time_list: list[Optional[str]] = []
         remaining_ttft: list[Optional[str]] = []
         meet_ttft: list[Optional[str]] = []
-        tpot: list[Optional[str]] = []
+        tbt: list[Optional[str]] = []
         decode_tokens: list[Optional[int]] = []
         max_tokens_list: list[int] = []
         request_data_id: list[Optional[int]] = []
@@ -1208,28 +1203,19 @@ class Scheduler(SchedulerInterface):
             ttft_slo_list.append(req.ttft_slo)
             max_tokens_list.append(req.max_tokens)
             request_data_id.append(req.request_data_id)
+            tbt.append(req.tbt)
 
             req_ttft = req.ttft
             if req_ttft is not None:
                 ttft_list.append(f"{req_ttft:.3f}")
                 meet_ttft.append("T" if req_ttft <= req.ttft_slo else "F")
-                decode_token = req.num_computed_tokens - req.num_prompt_tokens
-                decode_tokens.append(decode_token)
-                req_ttft_time = req.ttft_time
-                ttft_time_list.append(f"{req_ttft_time:.3f}")
+                decode_tokens.append(req.num_computed_tokens - req.num_prompt_tokens)
                 remaining_ttft.append(None)
-                if decode_token > 0:
-                    tpot.append(
-                        f"{(now_time - req_ttft_time) / decode_token * 1000:.3f}")
-                else:
-                    tpot.append(None)
             else:
                 ttft_list.append(None)
-                ttft_time_list.append(req.ttft_time)
                 remaining_ttft.append(
                     f"{req.ttft_slo - (now_time - req.arrival_time):.3f}")
                 meet_ttft.append(None)
-                tpot.append(None)
                 decode_tokens.append(None)
 
         self.batch_profiling_data = {
@@ -1246,12 +1232,11 @@ class Scheduler(SchedulerInterface):
             "chunk_sizes": chunk_sizes,
             "computed_tokens": computed_tokens,
             "cached_tokens": cached_tokens,
-            "ttft_time": ttft_time_list,
             "ttft_slo": ttft_slo_list,
             "ttft": ttft_list,
             "remaining_ttft": remaining_ttft,
             "meet_ttft": meet_ttft,
-            "tpot": tpot,
+            "tbt": tbt,
             "decode_tokens": decode_tokens,
             "max_tokens": max_tokens_list,
         }

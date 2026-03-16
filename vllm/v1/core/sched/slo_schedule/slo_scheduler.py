@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 SLO 感知调度器模块。
 
@@ -7,237 +5,107 @@ SLO 感知调度器模块。
 动态调整 token budget，以优化 TTFT SLO 达标率。
 """
 
-import os
-import time
-import logging
-
-from typing import Any
-
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+logger = init_logger(__name__)
 
 try:
-    from .chunk_predictor import DurationPredictor
-    from .chunk_simulator import ChunkSimulator, ReqSnapshot
-    from .random_chunker import RandomChunker
+    from .fixed_scheduler import FixedScheduler
+    from .random_scheduler import RandomScheduler
+    from .multislo_scheduler import MultiSloScheduler
+    from .sarathi_scheduler import SarathiScheduler
     from .config import SloSchedulerConfig
 except ImportError:
-    from chunk_predictor import DurationPredictor
-    from chunk_simulator import ChunkSimulator, ReqSnapshot
-    from random_chunker import RandomChunker
+    from fixed_scheduler import FixedScheduler
+    from random_scheduler import RandomScheduler
+    from multislo_scheduler import MultiSloScheduler
+    from sarathi_scheduler import SarathiScheduler
     from config import SloSchedulerConfig
 
-def convert_req_to_snapshot(req: Any) -> ReqSnapshot:
-    """
-    将 vllm request 对象转换为仿真器需要的 ReqSnapshot
-    """
-    return ReqSnapshot(
-        request_id=req.request_id,
-        num_computed_tokens=req.num_computed_tokens,
-        num_cached_tokens=getattr(req, 'num_cached_tokens', 0),
-        num_prompt_tokens=req.num_prompt_tokens,
-        arrival_time=req.arrival_time,
-        ttft_slo=getattr(req, 'ttft_slo', None),
-        max_tokens=req.max_tokens,
-        ttft=getattr(req, 'ttft', None),
-        finish_time=None,
-        tpot_type=getattr(req, 'tpot_type', None),
-        tpot_slo=getattr(req, 'tpot_slo', None),
-        accept=getattr(req, 'accept', None),
-        ttft_time=getattr(req, 'ttft_time', None),
-    )
-
+# 调度器映射
+scheduler_cls = {"random_chunk": RandomScheduler,
+             "sarathi": SarathiScheduler,
+             "mulslo": MultiSloScheduler,
+             "fixed_chunk": FixedScheduler}
 
 class SLOScheduler:
-    """
-    SLO 感知调度器
-    """
-    def __init__(
-        self,
-        max_num_scheduled_tokens: int = 2048,
-    ):
+    def __init__(self):
         self.config = SloSchedulerConfig.from_env()
 
-        self.model = self.config.model
-        self.fixed_chunk_size = self.config.fixed_chunk_size
-        self.max_num_scheduled_tokens = max_num_scheduled_tokens
-
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(current_dir, "models", self.model)
-        self.predictor = DurationPredictor.load(model_path)
-        self.simulator = ChunkSimulator(predictor=self.predictor)
-        self.random_chunker = RandomChunker()
-
+        self.sched_mode = self.config.sched_mode
+        try:
+            self.scheduler = scheduler_cls.get(self.sched_mode)()
+        except KeyError:
+            logger.error("Scheduler mode %s init failed", self.sched_mode)
+            self.sched_mode = "fixed_chunk"
+            self.scheduler = scheduler_cls.get(self.sched_mode)()
+            
+    def get_status(self) -> dict:
+        return {
+            "schedule_mode": self.sched_mode
+        }
+    
     def sched_decision(self, sched_state: dict) -> dict:
-        timing = {}  # record elapsed time for each step
-        total_start = time.perf_counter()
-
-        sched_decision = {"decode_only": False,
-                          "token_budget": self.max_num_scheduled_tokens,
-                          "slo_sched": False}
 
         running = sched_state['running']
         waiting = sched_state['waiting']
 
         # Step 1: 判断是否需要调度
-        t0 = time.perf_counter()
-        need_schedule = self._schedule_estimate(running, waiting)
-        timing['schedule_estimate'] = time.perf_counter() - t0
+        sched = self._sched_estimate(running, waiting)
 
-        if not need_schedule:
-            timing['total'] = time.perf_counter() - total_start
-            return sched_decision
-
-        # Step 2: 将 running 和 waiting 请求转换为 ReqSnapshot
-        t0 = time.perf_counter()
-        running_snapshots = [
-            convert_req_to_snapshot(req)
-            for req in running
-        ]
-        waiting_snapshots = [
-            convert_req_to_snapshot(req)
-            for req in waiting
-        ]
-        timing['convert_snapshot'] = time.perf_counter() - t0
-
-        # Step 3: 是否随机chunk
-        if self.random_chunker.enabled:
-            return self.random_chunker.random_from_list()
-        current_time = sched_state['current_time']
-
-        # Step 4: 是否固定chunk size
-        if self.fixed_chunk_size > 0:
-            sched_decision["token_budget"] = self.fixed_chunk_size
-            sched_decision["slo_sched"] = True
-            return sched_decision
+        if not sched["slo_sched"]:
+            return {
+                "decode_only": False,
+                "token_budget": sched_state["token_budget"],
+                "slo_sched": False}
         
-        # Step 5: 进行slo调度
-        t0 = time.perf_counter()
-        sched_decision["decode_only"], forward_timing = self.batch_forward(
-            running_snapshots, waiting_snapshots, current_time
-        )
-        timing['batch_forward'] = time.perf_counter() - t0
-        timing.update(forward_timing)
+        sched_state.update(sched)
 
-        timing['total'] = time.perf_counter() - total_start
-        sched_decision["slo_sched"] = True
-        return sched_decision
+        # Step 2:调用调度器执行调度决策
+        return self.scheduler.schedule(sched_state)
 
-    def _schedule_estimate(self, running: list, waiting: list):
+    def _sched_estimate(self, running: list, waiting: list):
         """判断是否需要进行chunk size调整调度"""
         num_running = len(running)
         num_waiting = len(waiting)
 
-        num_prefill, num_decode = self._count_running_types(running)
-
+        decoding, prefilling = self._classify_running(running)
+        num_decode = len(decoding)
+        num_prefill = len(prefilling)
+        
+        slo_sched = False
         if num_running != 0 and num_waiting == 0:
             # 1、有请求运行，无请求等待
             if num_prefill != 0 and num_decode != 0:
                 # 1.1、运行请求包括 prefill 和 decode 请求
-                return True
-            return False
+                slo_sched = True
+            else:
+                # 1.2、运行请求只包括 prefill 请求
+                slo_sched = False
 
         elif num_running != 0 and num_waiting != 0:
             # 2、 有请求运行，有请求等待
-            return num_decode != 0
-        return False
+            # 2.1、运行请求中包含 decode 请求
+            slo_sched = num_decode != 0
 
-    def _count_running_types(self, running):
-        """计算running队列中prefill和decode请求的数量"""
-        num_prefill = 0
-        num_decode = 0
+        return {
+                "decoding": decoding,
+                "prefilling": prefilling, 
+                "slo_sched": slo_sched
+        }
+
+    def _classify_running(self, running):
+        """对running队列中的请求进行分类，返回prefill和decode请求"""
+
+        decode_reqs = []
+        prefill_reqs = []
 
         for req in running:
             if req.num_computed_tokens >= req.num_prompt_tokens:
-                num_decode += 1
+                decode_reqs.append(req)
             else:
-                num_prefill += 1
-        return num_prefill, num_decode
+                prefill_reqs.append(req)
+        return decode_reqs,prefill_reqs
 
-    def _predict_decode_duration(self, final_running: list[ReqSnapshot]) -> float:
-        """
-        直接用 predictor 预测纯 decode 一次 iteration 的耗时（毫秒转秒）。
-        等价于对 final_running 中所有 decode 请求做一次 decode_only 仿真，
-        但跳过了仿真器的快照转换、状态管理等开销。
-        """
-        chunk_sizes = []
-        all_cached_tokens = []
-        all_computed_tokens = []
-
-        for req in final_running:
-            if req.num_computed_tokens >= req.num_prompt_tokens:
-                # decode request: chunk_size = 1
-                chunk_sizes.append(1)
-                all_cached_tokens.append(req.num_cached_tokens)
-                all_computed_tokens.append(req.num_computed_tokens)
-
-        if not chunk_sizes:
-            return 0.0
-
-        duration_ms = self.predictor.predict_ultrafast(
-            chunk_sizes=chunk_sizes,
-            all_cached_tokens=all_cached_tokens,
-            all_computed_tokens=all_computed_tokens,
-            total_scheduled_tokens=len(chunk_sizes),
-        )
-        return float(duration_ms) / 1000.0
-
-    def batch_forward(self, running_snapshots: list[ReqSnapshot],
-                      waiting_snapshots: list[ReqSnapshot],
-                      current_time: float) -> tuple[bool, dict]:
-        """判断是否需要decode only，同时返回内部各步耗时"""
-        forward_timing = {}
-
-        # 1、先进行一次PD融合计算
-        t0 = time.perf_counter()
-        result_pd = self.simulator.run(
-            running_reqs=running_snapshots,
-            waiting_reqs=waiting_snapshots,
-            max_iters=1,
-            start_time=current_time,
-            token_budget=self.max_num_scheduled_tokens,
-        )
-        forward_timing['  simulator_run'] = time.perf_counter() - t0
-        dura_time_pd = result_pd.end_time - current_time
-
-        # 2、直接用predictor预测纯decode一次iteration的耗时，
-        #    避免第二次仿真的快照转换和状态管理开销
-        t0 = time.perf_counter()
-        dura_time_d = self._predict_decode_duration(result_pd.final_running)
-        forward_timing['  predict_decode'] = time.perf_counter() - t0
-
-        decode_only = False
-        # 3、判断是否需要decode only
-        t0 = time.perf_counter()
-        for req in result_pd.final_running:
-            if not req.accept:
-                continue
-            if req.num_computed_tokens > req.num_prompt_tokens + 1:
-                # "> + 1" 是因为不考虑刚从prefill转到decode的请求，因为输出从0->1是属于prefill的时间
-                # decode请求，非 > 表明是已经有token输出的decode请求
-                # 而不是从 prefill 转到decode的请求
-                if req.tpot_type == 0:
-                    # 0 表示coding 类型的请求,这类请求只要最终请求完成时计算的tpot满足slo即可
-                    # 剩余要生成的token数
-                    remain_tokens = req.max_tokens + req.num_prompt_tokens - req.num_computed_tokens
-                    tpot = (dura_time_pd + dura_time_d * remain_tokens + current_time - req.ttft_time) / req.max_tokens * 1000
-                    if tpot > req.tpot_slo:
-                        decode_only = True
-                        break
-                elif req.tpot_type == 1:
-                    # 1 表示对话类型的请求,这类请求要求每输出一个token时计算的tpot都要满足slo
-                    decoded_tokens = req.num_computed_tokens - req.num_prompt_tokens
-                    tpot_temp = (result_pd.end_time - req.ttft_time)/decoded_tokens * 1000
-                    if tpot_temp > req.tpot_slo:
-                        decode_only = True
-                        break
-        forward_timing['  tpot_check'] = time.perf_counter() - t0
-
-        return decode_only, forward_timing
-
-
-# 模块导出
-__all__ = [
-    'SLOScheduler',
-    'convert_req_to_snapshot',
-    'ReqSnapshot',
-]
+# __all__ = [
+#     'SLOScheduler'
+# ]

@@ -5,7 +5,7 @@ try:
 except ImportError:
     from config import SloSchedulerConfig
 
-class RandomChunker:
+class RandomScheduler:
     def __init__(self):
         self.config = SloSchedulerConfig.from_env()
         self.chunk_sizes = (
@@ -13,7 +13,6 @@ class RandomChunker:
         )
         if not self.chunk_sizes:
             raise ValueError("chunk_sizes must be non-empty")
-        self.enabled = self.config.random_chunk_enabled
         self.min_chunk = self.config.min_chunk
         self.max_chunk = self.config.max_chunk
 
@@ -21,7 +20,10 @@ class RandomChunker:
         self._randint = random.randint
         self._decode_threshold = 32
 
-    def random_from_list(self) -> dict:
+    def schedule(self, sched_state: dict) -> dict:
+        return self._random_from_list()
+    
+    def _random_from_list(self) -> dict:
         token_budget = self._choice(self.chunk_sizes)
         return {
             "decode_only": token_budget == self._decode_threshold,
@@ -29,10 +31,14 @@ class RandomChunker:
             "slo_sched": True,
         }
 
-    def random_in_range(self) -> dict:
+    def _random_in_range(self) -> dict:
         token_budget = self._randint(self.min_chunk, self.max_chunk)
         return {
             "decode_only": token_budget <= self._decode_threshold,
             "token_budget": token_budget,
             "slo_sched": True,
         }
+
+__all__ = [
+    "RandomScheduler",
+]

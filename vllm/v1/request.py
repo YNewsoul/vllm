@@ -103,10 +103,9 @@ class Request:
                 self.arrival_time = self.extra_data.get('arrival_time', None)
                 self.ttft_slo = self.extra_data.get('ttft_slo', None)
                 self.request_data_id = self.extra_data.get('request_data_id', None)
-                self.tpot_type = self.extra_data.get('tpot_type', None)
+                self.tbt = self.extra_data.get('tbt', None)
         self.ttft = None
-        self.ttft_time = None
-        self.accept = True
+        self.safeguard = False
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
