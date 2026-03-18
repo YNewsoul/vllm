@@ -11,8 +11,6 @@ class RandomScheduler:
         self.chunk_sizes = (
             32, 64, 128, 256, 512, 1024, 2048
         )
-        if not self.chunk_sizes:
-            raise ValueError("chunk_sizes must be non-empty")
         self.min_chunk = self.config.min_chunk
         self.max_chunk = self.config.max_chunk
 
@@ -29,6 +27,7 @@ class RandomScheduler:
             "decode_only": token_budget == self._decode_threshold,
             "token_budget": token_budget,
             "slo_sched": True,
+            "assigned": None,
         }
 
     def _random_in_range(self) -> dict:
@@ -37,8 +36,5 @@ class RandomScheduler:
             "decode_only": token_budget <= self._decode_threshold,
             "token_budget": token_budget,
             "slo_sched": True,
+            "assigned": None,
         }
-
-__all__ = [
-    "RandomScheduler",
-]

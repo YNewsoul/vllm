@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-# profiling相关的导入
 import json
 import os
 import threading
@@ -40,12 +39,12 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
-# RL/SLA感知调度器导入
 try:
-    from .slo_schedule import SLOScheduler
+    from .slo_schedule import SloScheduler
+    from .slo_schedule import SloLogger
     SLO_SCHEDULER_AVAILABLE = True
 except ImportError as e:
-    logger.warning("SLO调度器不可用: %s", e)
+    logger.warning("Slo scheduler not available: %s", e)
     SLO_SCHEDULER_AVAILABLE = False
 
 class Scheduler(SchedulerInterface):
@@ -190,23 +189,23 @@ class Scheduler(SchedulerInterface):
             os.makedirs(date_dir, exist_ok=True)
             self.profiling_log_file = os.path.join(
                 date_dir, profiling_log_filename)
-            logger.info("The profiling log file: %s", self.profiling_log_file)
+            logger.info("The VLLM profiling log file: %s", self.profiling_log_file)
             self._profiling_queue = Queue()
             self._profiling_writer_stop = threading.Event()
             self._start_profiling_writer_thread()
 
         # SLO调度器设置
         self.slo_scheduler = None
-        logger.info("SLO Scheduler available: %s, enabled: %s", SLO_SCHEDULER_AVAILABLE, os.getenv(
-                'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true')
         if SLO_SCHEDULER_AVAILABLE and os.getenv(
                 'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true':
             try:
-                self.slo_scheduler = SLOScheduler()
-                logger.info("SLO Scheduler initialized successfully!")
+                self.slo_scheduler = SloScheduler()
+                logger.info("Slo Scheduler initialized successfully!Status:%s", self.slo_scheduler.get_status())
             except Exception as e:
-                logger.warning("SLO Scheduler initialization failed: %s", e)
+                logger.warning("Slo Scheduler initialization failed: %s", e)
         self.slo_sched = False
+
+        self.slo_logger = SloLogger()
 
     def schedule(self) -> SchedulerOutput:
         # 注意(woosuk)关于调度算法：
@@ -235,12 +234,16 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int] = {}  # 记录每个请求已调度的token数
 
         token_budget = self.max_num_scheduled_tokens
-        # 使用SLO调度器
+        assigned = None
+        decode_only = False
+        # 使用Slo调度器
         if self.slo_scheduler:
             schedule_decision = self.slo_scheduler.sched_decision(
-                self.get_schedule_state())
+                self._schedule_state())
             token_budget = schedule_decision['token_budget']
             self.slo_sched = schedule_decision['slo_sched']
+            decode_only = schedule_decision.get('decode_only', False)
+            assigned = schedule_decision.get('assigned', None)
 
         init_token_budget = token_budget
 
@@ -258,12 +261,19 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
+            if assigned and request.request_id not in assigned:
+                # 不分配该请求
+                req_index += 1
+                continue
+
             # 计算该请求需要的新token数量
             num_new_tokens = (request.num_tokens_with_spec -
                               request.num_computed_tokens)
+            
+            if assigned:
+                num_new_tokens = min(num_new_tokens, assigned[request.request_id])
 
-            if self.slo_scheduler and num_new_tokens > 1 and schedule_decision.get(
-                    'decode_only', False):
+            if decode_only and num_new_tokens > 1 :
                 # 纯解码，跳过prefill请求
                 req_index += 1
                 continue
@@ -392,14 +402,19 @@ class Scheduler(SchedulerInterface):
             # 只有在没有抢占发生时才调度新请求
             while self.waiting and token_budget > 0:
 
-                if self.slo_scheduler and schedule_decision.get(
-                        'decode_only', False):
+                if decode_only:
                     # 纯解码，跳过prefill请求
                     break
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request = self.waiting[0]
+
+                if assigned and request.request_id not in assigned:
+                    # 不分配该请求
+                    self.waiting.popleft()
+                    skipped_waiting_requests.appendleft(request)
+                    continue
 
                 # KVTransfer：如果仍在等待远程KV，则跳过请求
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -669,7 +684,9 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens=num_scheduled_tokens,
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
                 token_budget=init_token_budget)
-
+            
+        # 添加吞吐量信息
+        self.slo_logger.add_tokens(total_num_scheduled_tokens - len(self.running))
         return scheduler_output
 
     def _make_cached_request_data(
@@ -967,6 +984,12 @@ class Scheduler(SchedulerInterface):
             next(iter(engine_core_outputs.values())).scheduler_stats = (
                 self.make_stats(spec_decoding_stats))
 
+        # 更新waiting请求的safeguard状态
+        now_time = time.time()
+        for req in self.waiting:
+            if now_time - req.arrival_time > req.ttft_slo:
+                req.safeguard = False
+                
         return engine_core_outputs
 
     def get_request_counts(self) -> tuple[int, int]:
@@ -1261,13 +1284,14 @@ class Scheduler(SchedulerInterface):
 
         self.batch_id += 1
 
-    def get_schedule_state(self) -> dict:
+    def _schedule_state(self) -> dict:
         """
-        获取running和waiting请求队列，用于仿真。
+        获取调度信息
         """
         return {
             'running': self.running,
             'waiting': self.waiting,
             'current_time': time.time(),
             'token_budget': self.max_num_scheduled_tokens,
+            'throughput': self.slo_logger.get_throughput(),
         }

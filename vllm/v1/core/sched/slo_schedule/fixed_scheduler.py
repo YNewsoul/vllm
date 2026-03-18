@@ -19,8 +19,5 @@ class FixedScheduler:
             "decode_only": False,
             "token_budget": token_budget,
             "slo_sched": True,
+            "assigned": None,
         }
-
-# __all__ = [
-#     "FixedScheduler",
-# ]

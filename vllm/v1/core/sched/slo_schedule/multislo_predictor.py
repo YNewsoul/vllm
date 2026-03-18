@@ -498,7 +498,7 @@ class MultiSloPredictor:
         joblib.dump(payload, path)
 
     @classmethod
-    def load(cls, path: str) -> "MulsloPredictor":
+    def load(cls, path: str) -> "MultiSloPredictor":
         data = joblib.load(path)
 
         if isinstance(data, dict) and "global" in data:
@@ -519,8 +519,3 @@ class MultiSloPredictor:
             f"Unsupported model format in {path}. "
             "Please retrain with current theoretical_trainer.py to generate v3 model."
         )
-
-
-__all__ = [
-    "MulSloPredictor",
-]

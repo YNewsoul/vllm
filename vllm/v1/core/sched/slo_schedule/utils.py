@@ -1,5 +1,7 @@
-
+import time
 from typing import Any
+import logging
+logger = logging.getLogger(__name__)
 
 from collections import namedtuple
 
@@ -35,3 +37,27 @@ def convert_req_to_snapshot(req: Any) -> ReqSnapshot:
         tbt=getattr(req, 'tbt', None),
         safeguard=getattr(req, 'safeguard', None),
     )
+
+class SloLogger:
+    def __init__(self):
+        self.num_tokens = 0
+        self.last_log_time = None
+        self.throughput = 2000.0 # 初始值设置为2000
+    
+    def _reset(self):
+        self.num_tokens = 0
+
+    def add_tokens(self, num_tokens: int):
+        if self.last_log_time is None:
+            self.last_log_time = time.monotonic()
+        self.num_tokens += num_tokens
+        now = time.monotonic()
+        elapsed = now - self.last_log_time
+        if elapsed >= 1.0:
+            self.throughput = self.num_tokens / elapsed
+            logger.info("Throughput: %.2f tokens/s", self.throughput)
+            self.last_log_time = now
+            self._reset()
+            
+    def get_throughput(self) -> float:
+        return self.throughput 

@@ -3,10 +3,8 @@ from typing import List
 
 try:
     from .utils import ReqSnapshot
-    from .multislo_predictor import MulsloPredictor
 except ImportError:
     from utils import ReqSnapshot
-    from multislo_predictor import MulsloPredictor
 
 class BatchForwarder:
     """
@@ -14,15 +12,15 @@ class BatchForwarder:
     """
     def __init__(
         self,
-        predictor: MulsloPredictor = None,
+        predictor,
     ):
         self.predictor = predictor
 
-    def run(
+    def forward(
         self,
-        decoding_reqs: List[ReqSnapshot],
-        prefilling_reqs: List[ReqSnapshot],
-        waiting_reqs: deque[ReqSnapshot],
+        decoding: List[ReqSnapshot],
+        prefilling: List[ReqSnapshot],
+        waiting: deque[ReqSnapshot],
         token_budget: int = 2048,
     ) -> float:
         """
@@ -33,31 +31,34 @@ class BatchForwarder:
         chunk_sizes: List[int] = []
         computed_tokens: List[int] = []
         cached_tokens: List[int] = []
+        assigned: dict[str, int] = {}
 
         # 2.分配tokens
         # 2.1 第一优先级：分配给 running 队列的 decode 请求
 
-        for req in decoding_reqs:
+        for req in decoding:
             chunk_sizes.append(1)
             computed_tokens.append(req.num_computed_tokens)
             cached_tokens.append(req.num_cached_tokens)
+            assigned[req.request_id] = 1
             token_budget -= 1
        
         # 2.2 第二优先级：分配给 running 队列的 prefill 请求（FCFS）
-        for req in prefilling_reqs:
+        for req in prefilling:
             if token_budget <= 0:
                 break
             chunk = min(
                 req.num_prompt_tokens - req.num_computed_tokens, token_budget
             )
             chunk_sizes.append(chunk)
-            computed_tokens.append(req.num_computed_tokens)
+            computed_tokens.append(req.num_computed_tokens + chunk)
             cached_tokens.append(req.num_cached_tokens)
+            assigned[req.request_id] = chunk
             token_budget -= chunk
 
         # 2.3 第三优先级：分配给 waiting 队列的请求（FCFS）
-        while waiting_reqs and token_budget > 0:
-            req = waiting_reqs.popleft()
+        while waiting and token_budget > 0:
+            req = waiting.popleft()
 
             chunk = min(
                 req.num_prompt_tokens - req.num_computed_tokens,
@@ -67,6 +68,7 @@ class BatchForwarder:
             chunk_sizes.append(chunk)
             computed_tokens.append(req.num_computed_tokens)
             cached_tokens.append(req.num_cached_tokens)
+            assigned[req.request_id] = chunk
             token_budget -= chunk
         
         sched_tokens = sum(chunk_sizes)
@@ -80,8 +82,62 @@ class BatchForwarder:
                 sched_tokens=sched_tokens,
             )
         )
-        return iter_ms
+        return iter_ms, assigned
 
-__all__ = [
-    "BatchForwarder"
-]
+    def time_to_token_budget(
+        self,
+        decoding: List[ReqSnapshot],
+        prefilling: List[ReqSnapshot],
+        waiting: deque[ReqSnapshot],
+        target_iter_ms: float = 50,
+        max_iters: int = 10,
+        tolerance_pct: float = 0.05,
+        lowest_budget: int = 60,
+    ) -> int:
+        """
+        给定目标 iteration 时长，二分搜索近似对应的 token budget
+        """
+        low = lowest_budget
+        high = self._get_high(target_iter_ms)
+
+        best_budget = low
+        best_diff = float("inf")
+        best_assigned = None
+
+        while low <= high and max_iters > 0:
+            mid = (low + high) // 2
+            pred_ms, assigned = self.forward(
+                decoding=decoding,
+                prefilling=prefilling,
+                waiting=deque(waiting),
+                token_budget=mid,
+            )
+            diff = abs(pred_ms - target_iter_ms)
+            if diff < best_diff:
+                best_budget = mid
+                best_diff = diff
+                best_assigned = assigned
+
+            relative_error = diff / target_iter_ms
+
+            if relative_error <= tolerance_pct:
+                return mid, assigned
+
+            if pred_ms < target_iter_ms:
+                low = mid + 1
+            else:
+                high = mid - 1
+            max_iters -= 1
+        return best_budget, best_assigned
+    
+    def _get_high(self, target_iter_ms: float) -> int:
+        """
+        获取最高的 token budget，用于二分搜索
+        """
+        if target_iter_ms <= 50:
+            return 300
+        if target_iter_ms <= 100:
+            return 600
+        if target_iter_ms <= 200:
+            return 1300
+        return 2048

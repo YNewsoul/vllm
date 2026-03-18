@@ -13,28 +13,33 @@ try:
     from .random_scheduler import RandomScheduler
     from .multislo_scheduler import MultiSloScheduler
     from .sarathi_scheduler import SarathiScheduler
+    from .qoserve_scheduler import QoServeScheduler
     from .config import SloSchedulerConfig
 except ImportError:
     from fixed_scheduler import FixedScheduler
     from random_scheduler import RandomScheduler
     from multislo_scheduler import MultiSloScheduler
     from sarathi_scheduler import SarathiScheduler
+    from qoserve_scheduler import QoServeScheduler
     from config import SloSchedulerConfig
 
 # 调度器映射
-scheduler_cls = {"random_chunk": RandomScheduler,
-             "sarathi": SarathiScheduler,
-             "mulslo": MultiSloScheduler,
-             "fixed_chunk": FixedScheduler}
+scheduler_cls = {
+        "random_chunk": RandomScheduler,
+        "sarathi": SarathiScheduler,
+        "multislo": MultiSloScheduler,
+        "fixed_chunk": FixedScheduler,
+        "qoserve": QoServeScheduler,
+    }
 
-class SLOScheduler:
+class SloScheduler:
     def __init__(self):
         self.config = SloSchedulerConfig.from_env()
 
         self.sched_mode = self.config.sched_mode
         try:
             self.scheduler = scheduler_cls.get(self.sched_mode)()
-        except KeyError:
+        except TypeError:
             logger.error("Scheduler mode %s init failed", self.sched_mode)
             self.sched_mode = "fixed_chunk"
             self.scheduler = scheduler_cls.get(self.sched_mode)()
@@ -56,11 +61,13 @@ class SLOScheduler:
             return {
                 "decode_only": False,
                 "token_budget": sched_state["token_budget"],
-                "slo_sched": False}
+                "slo_sched": False,
+                "assigned":None}
         
+        # Step 2: 更新sched_state,包含更细的划分
         sched_state.update(sched)
 
-        # Step 2:调用调度器执行调度决策
+        # Step 3:调用调度器执行调度决策
         return self.scheduler.schedule(sched_state)
 
     def _sched_estimate(self, running: list, waiting: list):
@@ -96,16 +103,12 @@ class SLOScheduler:
     def _classify_running(self, running):
         """对running队列中的请求进行分类，返回prefill和decode请求"""
 
-        decode_reqs = []
-        prefill_reqs = []
+        decoding = []
+        prefilling = []
 
         for req in running:
             if req.num_computed_tokens >= req.num_prompt_tokens:
-                decode_reqs.append(req)
+                decoding.append(req)
             else:
-                prefill_reqs.append(req)
-        return decode_reqs,prefill_reqs
-
-# __all__ = [
-#     'SLOScheduler'
-# ]
+                prefilling.append(req)
+        return decoding,prefilling
