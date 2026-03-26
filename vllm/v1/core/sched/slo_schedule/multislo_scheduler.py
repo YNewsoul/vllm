@@ -1,17 +1,17 @@
 import os
 
-from collections import deque
+from typing import List
 
 try:
     from .config import SloSchedulerConfig
     from .batch_forwarder import BatchForwarder
     from .multislo_predictor import MultiSloPredictor
-    from .utils import convert_req_to_snapshot
+    from .utils import convert_req_to_snapshot, ReqSnapshot
 except ImportError:
     from config import SloSchedulerConfig
     from batch_forwarder import BatchForwarder
     from multislo_predictor import MultiSloPredictor
-    from utils import convert_req_to_snapshot
+    from utils import convert_req_to_snapshot, ReqSnapshot
 
 
 class MultiSloScheduler:
@@ -42,10 +42,10 @@ class MultiSloScheduler:
             convert_req_to_snapshot(req)
             for req in prefilling
         ]
-        waiting_snapshots = deque([
+        waiting_snapshots = [
             convert_req_to_snapshot(req)
             for req in waiting
-        ])
+        ]
 
         current_time = sched_state['current_time']
 
@@ -67,38 +67,41 @@ class MultiSloScheduler:
         )
 
         # Step 4:判断是否需要 decode only
-        min_iter_time = 1
+        # 记录当前最小迭代时间和下一个最小迭代时间
+        min_iter_time = next_min_iter_time = 1
         for req in decoding:
             # 只对需要safeguard的请求进行判断
             if not req.safeguard:
                 continue
             decoded_tokens = max(0, req.num_computed_tokens - req.num_prompt_tokens)
-            next_token_slack = req.arrival_time + req.ttft_slo + decoded_tokens*req.tbt - current_time
-            min_iter_time = min(min_iter_time, next_token_slack)
-
-        if min_iter_time*1000 < iter_ms:
+            token_slack = req.arrival_time + req.ttft_slo + decoded_tokens*req.tbt - current_time
+            min_iter_time = min(min_iter_time, token_slack)
+            next_min_iter_time = min(next_min_iter_time, token_slack - min_iter_time + req.tbt)
+            
+        if min_iter_time*1000 > iter_ms:
             return {
-            "decode_only": True,
-            "token_budget": token_budget,
-            "slo_sched": True,
-            "assigned": None,
-        }
-        
-        return {
-            "decode_only": False,
-            "token_budget": token_budget,
-            "slo_sched": True,
-            "assigned": assigned,
-        }
+                "decode_only": False,
+                "token_budget": token_budget,
+                "slo_sched": True,
+                "assigned": assigned,
+            }
+        return self._compare_iter(
+            decoding=decoding_snapshots,
+            prefilling=prefilling_snapshots,
+            waiting=waiting_snapshots,
+            token_budget=token_budget,
+            min_iter_time=min_iter_time,
+            next_min_iter_time=next_min_iter_time,
+        )
 
     def _reorder_prefill_waiting_by_priority(
         self,
         prefilling_snapshots: list,
-        waiting_snapshots: deque,
+        waiting_snapshots: list,
         now: float,
         throughput: float,
-    ) -> tuple[list, deque]:
-        all_reqs = list(prefilling_snapshots) + list(waiting_snapshots)
+    ) -> tuple[list, list]:
+        all_reqs = prefilling_snapshots + waiting_snapshots
 
         def priority_key(req):
             remaining_tokens = req.num_prompt_tokens - req.num_computed_tokens
@@ -110,5 +113,58 @@ class MultiSloScheduler:
             urgent_rank = 0 if ratio > self.__alpha else 1
             return (safeguard_rank, urgent_rank, remaining_tokens)
 
-        ordered_waiting = deque(sorted(all_reqs, key=priority_key))
+        ordered_waiting = sorted(all_reqs, key=priority_key)
         return [], ordered_waiting
+    
+    def _compare_iter(
+        self, 
+        decoding: List[ReqSnapshot],
+        prefilling: List[ReqSnapshot],
+        waiting: List[ReqSnapshot],
+        token_budget: int = 2048,
+        min_iter_time: float = 1, 
+        next_min_iter_time: float = 1
+    ) -> dict:
+        # 当前的token budget
+        cur_token_budget, _ = self.batch_forwarder.time_to_token_budget(
+            decoding=decoding,
+            prefilling=prefilling,
+            waiting=waiting,
+            target_iter_ms=min_iter_time*1000,
+        )
+        # 下一个迭代时间的token budget
+        next_token_budget, _ = self.batch_forwarder.time_to_token_budget(
+            decoding=decoding,
+            prefilling=prefilling,
+            waiting=waiting,
+            target_iter_ms=next_min_iter_time*1000,
+        )
+        # 纯解码的迭代时间
+        num_decoding = len(decoding)
+        decode_only_iter_ms, _ = self.batch_forwarder.forward(
+            decoding=decoding,
+            prefilling=prefilling,
+            waiting=waiting,
+            token_budget=num_decoding,
+        )
+        # 下一个大的迭代时间
+        next_iter_ms, _ = self.batch_forwarder.forward(
+            decoding=decoding,
+            prefilling=prefilling,
+            waiting=waiting,
+            token_budget=cur_token_budget + next_token_budget - num_decoding,
+            return_assigned=False,
+        )
+        if decode_only_iter_ms + next_iter_ms < (min_iter_time + next_min_iter_time)*1000:
+            return {
+            "decode_only": True,
+            "token_budget": token_budget,
+            "slo_sched": True,
+            "assigned": None,
+        }
+        return {
+            "decode_only": False,
+            "token_budget": cur_token_budget,
+            "slo_sched": True,
+            "assigned": None,
+        }

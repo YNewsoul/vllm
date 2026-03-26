@@ -1209,13 +1209,13 @@ class Scheduler(SchedulerInterface):
         chunk_sizes: list[int] = []
         computed_tokens: list[int] = []
         cached_tokens: list[int] = []
-        ttft_list: list[Optional[str]] = []
-        ttft_slo_list: list[float] = []
-        remaining_ttft: list[Optional[str]] = []
-        meet_ttft: list[Optional[str]] = []
+        # ttft_list: list[Optional[str]] = []
+        # ttft_slo_list: list[float] = []
+        # remaining_ttft: list[Optional[str]] = []
+        # meet_ttft: list[Optional[str]] = []
         tbt: list[Optional[str]] = []
         decode_tokens: list[Optional[int]] = []
-        max_tokens_list: list[int] = []
+        # max_tokens_list: list[int] = []
         request_data_id: list[Optional[int]] = []
 
         # 单次遍历本轮被调度请求
@@ -1223,22 +1223,22 @@ class Scheduler(SchedulerInterface):
             chunk_sizes.append(num_scheduled_tokens[req.request_id])
             computed_tokens.append(req.num_computed_tokens)
             cached_tokens.append(req.num_cached_tokens)
-            ttft_slo_list.append(req.ttft_slo)
-            max_tokens_list.append(req.max_tokens)
+            # ttft_slo_list.append(req.ttft_slo)
+            # max_tokens_list.append(req.max_tokens)
             request_data_id.append(req.request_data_id)
             tbt.append(req.tbt)
 
             req_ttft = req.ttft
             if req_ttft is not None:
-                ttft_list.append(f"{req_ttft:.3f}")
-                meet_ttft.append("T" if req_ttft <= req.ttft_slo else "F")
+                # ttft_list.append(f"{req_ttft:.3f}")
+                # meet_ttft.append("T" if req_ttft <= req.ttft_slo else "F")
                 decode_tokens.append(req.num_computed_tokens - req.num_prompt_tokens)
-                remaining_ttft.append(None)
+                # remaining_ttft.append(None)
             else:
-                ttft_list.append(None)
-                remaining_ttft.append(
-                    f"{req.ttft_slo - (now_time - req.arrival_time):.3f}")
-                meet_ttft.append(None)
+                # ttft_list.append(None)
+                # remaining_ttft.append(
+                #     f"{req.ttft_slo - (now_time - req.arrival_time):.3f}")
+                # meet_ttft.append(None)
                 decode_tokens.append(None)
 
         self.batch_profiling_data = {
@@ -1255,13 +1255,13 @@ class Scheduler(SchedulerInterface):
             "chunk_sizes": chunk_sizes,
             "computed_tokens": computed_tokens,
             "cached_tokens": cached_tokens,
-            "ttft_slo": ttft_slo_list,
-            "ttft": ttft_list,
-            "remaining_ttft": remaining_ttft,
-            "meet_ttft": meet_ttft,
+            # "ttft_slo": ttft_slo_list,
+            # "ttft": ttft_list,
+            # "remaining_ttft": remaining_ttft,
+            # "meet_ttft": meet_ttft,
             "tbt": tbt,
             "decode_tokens": decode_tokens,
-            "max_tokens": max_tokens_list,
+            # "max_tokens": max_tokens_list,
         }
 
     def _finalize_and_log_profiling(self, model_run_duration: float) -> None:

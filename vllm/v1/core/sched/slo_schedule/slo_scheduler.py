@@ -25,10 +25,10 @@ except ImportError:
 
 # 调度器映射
 scheduler_cls = {
-        "random_chunk": RandomScheduler,
+        "random-chunk": RandomScheduler,
         "sarathi": SarathiScheduler,
         "multislo": MultiSloScheduler,
-        "fixed_chunk": FixedScheduler,
+        "fixed-chunk": FixedScheduler,
         "qoserve": QoServeScheduler,
     }
 

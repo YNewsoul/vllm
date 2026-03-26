@@ -8,7 +8,7 @@ class SloSchedulerConfig:
     min_chunk: int = 32
     max_chunk: int = 2048
     fixed_chunk_size: int = 2048
-    sched_mode: str = "multislo" # 调度模型，可选 "multislo","random_chunk","fixed_chunk","sarathi","qoserve"
+    sched_mode: str = "multislo" # 调度模型，可选 "multislo","random-chunk","fixed-chunk","sarathi","qoserve"
     sarathi_mode: str = "fcfs" # sarathi 调度模式，可选 "fcfs","edf","srpf"
     qoserve_alpha: float = 0.1
     multislo_urgency_threshold: float = 0.5

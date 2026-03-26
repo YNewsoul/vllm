@@ -1,7 +1,5 @@
 import os
 
-from collections import deque
-
 try:
     from .config import SloSchedulerConfig
     from .batch_forwarder import BatchForwarder
@@ -41,10 +39,11 @@ class SarathiScheduler:
             convert_req_to_snapshot(req)
             for req in prefilling
         ]
-        waiting_snapshots = deque([
+        # 改成list
+        waiting_snapshots = [
             convert_req_to_snapshot(req)
             for req in waiting
-        ])
+        ]
         
         # Step 2: 从decoing请求中获取最严格tbt
         min_iter_time = 1
@@ -67,9 +66,6 @@ class SarathiScheduler:
             target_iter_ms=min_iter_time*1000,
         )
 
-        if self.sarathi_mode == "fcfs":
-            assigned_tokens = None
-
         return {
             "decode_only": False,
             "token_budget": token_budget,
@@ -79,8 +75,10 @@ class SarathiScheduler:
 
 
     def _sarathi_edf(self, prefilling_snapshots: list,
-                            waiting_snapshots: deque) -> tuple[list, deque]:
-        all_reqs = list(prefilling_snapshots) + list(waiting_snapshots)
+                            waiting_snapshots: list) -> tuple[list, list]:
+        all_reqs = prefilling_snapshots + waiting_snapshots
+        if len(all_reqs) < 2:
+            return [], all_reqs
 
         def edf_key(req):
             deadline = req.arrival_time + (req.ttft_slo or float("inf"))
@@ -90,12 +88,14 @@ class SarathiScheduler:
             return (deadline, remaining_prefill, req.arrival_time)
 
         ordered = sorted(all_reqs, key=edf_key)
-        return [], deque(ordered)
+        return [], ordered
 
 
     def _sarathi_srpf(self, prefilling_snapshots: list,
-                            waiting_snapshots: deque) -> tuple[list, deque]:
-        all_reqs = list(prefilling_snapshots) + list(waiting_snapshots)
+                            waiting_snapshots: list) -> tuple[list, list]:
+        all_reqs = prefilling_snapshots + waiting_snapshots
+        if len(all_reqs) < 2:
+            return [], all_reqs
 
         def srpf_key(req):
             remaining_prefill = max(0,
@@ -105,4 +105,4 @@ class SarathiScheduler:
             return (remaining_prefill, deadline, req.arrival_time)
 
         ordered = sorted(all_reqs, key=srpf_key)
-        return [], deque(ordered)
+        return [], ordered

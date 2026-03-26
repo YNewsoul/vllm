@@ -1,7 +1,5 @@
 import os
 
-from collections import deque
-
 try:
     from .config import SloSchedulerConfig
     from .batch_forwarder import BatchForwarder
@@ -40,10 +38,10 @@ class QoServeScheduler:
             convert_req_to_snapshot(req)
             for req in prefilling
         ]
-        waiting_snapshots = deque([
+        waiting_snapshots = [
             convert_req_to_snapshot(req)
             for req in waiting
-        ])
+        ]
 
         # Step 2:从decoding中获取最大可支持的iter_time
         current_time = sched_state['current_time']
@@ -80,9 +78,11 @@ class QoServeScheduler:
     def _qoserve_priority(
         self,
         prefilling_snapshots: list,
-        waiting_snapshots: deque,
-    ) -> tuple[list, deque]:
-        all_reqs = list(prefilling_snapshots) + list(waiting_snapshots)
+        waiting_snapshots: list,
+    ) -> tuple[list, list]:
+        all_reqs = prefilling_snapshots + waiting_snapshots
+        if len(all_reqs) < 2:
+            return [], all_reqs
 
         def priority_key(req):
             remaining = req.num_prompt_tokens - req.num_computed_tokens
@@ -90,5 +90,5 @@ class QoServeScheduler:
             is_degraded = 1 if bool(req.safeguard) else 0
             return (is_degraded, priority, req.arrival_time)
 
-        ordered_waiting = deque(sorted(all_reqs, key=priority_key))
+        ordered_waiting = sorted(all_reqs, key=priority_key)
         return [], ordered_waiting

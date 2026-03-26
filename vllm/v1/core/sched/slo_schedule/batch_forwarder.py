@@ -1,4 +1,3 @@
-from collections import deque
 from typing import List
 
 try:
@@ -20,24 +19,27 @@ class BatchForwarder:
         self,
         decoding: List[ReqSnapshot],
         prefilling: List[ReqSnapshot],
-        waiting: deque[ReqSnapshot],
+        waiting: List[ReqSnapshot],
         token_budget: int = 2048,
-    ) -> float:
+    ) -> tuple[float, dict[str, int] | None]:
         """
-        运行一次iteration，返回 iteration 执行时长（毫秒）
+        运行一次 iteration，返回执行时长（毫秒）和分配结果。
+        waiting 只读遍历，不会被修改。
         """
-            
+
         # 1.初始化分配列表
         chunk_sizes: List[int] = []
         computed_tokens: List[int] = []
         cached_tokens: List[int] = []
         assigned: dict[str, int] = {}
+        sched_tokens = 0
 
         # 2.分配tokens
         # 2.1 第一优先级：分配给 running 队列的 decode 请求
 
         for req in decoding:
             chunk_sizes.append(1)
+            sched_tokens += 1
             computed_tokens.append(req.num_computed_tokens)
             cached_tokens.append(req.num_cached_tokens)
             assigned[req.request_id] = 1
@@ -51,14 +53,16 @@ class BatchForwarder:
                 req.num_prompt_tokens - req.num_computed_tokens, token_budget
             )
             chunk_sizes.append(chunk)
+            sched_tokens += chunk
             computed_tokens.append(req.num_computed_tokens + chunk)
             cached_tokens.append(req.num_cached_tokens)
             assigned[req.request_id] = chunk
             token_budget -= chunk
 
         # 2.3 第三优先级：分配给 waiting 队列的请求（FCFS）
-        while waiting and token_budget > 0:
-            req = waiting.popleft()
+        for req in waiting:
+            if token_budget <= 0:
+                break
 
             chunk = min(
                 req.num_prompt_tokens - req.num_computed_tokens,
@@ -66,12 +70,11 @@ class BatchForwarder:
             )
 
             chunk_sizes.append(chunk)
+            sched_tokens += chunk
             computed_tokens.append(req.num_computed_tokens)
             cached_tokens.append(req.num_cached_tokens)
             assigned[req.request_id] = chunk
             token_budget -= chunk
-        
-        sched_tokens = sum(chunk_sizes)
 
         # 调用预测器进行时长预测
         iter_ms = float(
@@ -88,12 +91,12 @@ class BatchForwarder:
         self,
         decoding: List[ReqSnapshot],
         prefilling: List[ReqSnapshot],
-        waiting: deque[ReqSnapshot],
+        waiting: List[ReqSnapshot],
         target_iter_ms: float = 50,
         max_iters: int = 10,
         tolerance_pct: float = 0.05,
         lowest_budget: int = 60,
-    ) -> int:
+    ) -> tuple[int, dict[str, int] | None]:
         """
         给定目标 iteration 时长，二分搜索近似对应的 token budget
         """
@@ -109,7 +112,7 @@ class BatchForwarder:
             pred_ms, assigned = self.forward(
                 decoding=decoding,
                 prefilling=prefilling,
-                waiting=deque(waiting),
+                waiting=waiting,
                 token_budget=mid,
             )
             diff = abs(pred_ms - target_iter_ms)
