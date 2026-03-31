@@ -159,6 +159,14 @@ class CompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    extra_data: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional structured metadata passed through to "
+            "SamplingParams.extra_args['extra_data']."
+        ),
+    )
+
     vllm_xargs: dict[str, str | int | float] | None = Field(
         default=None,
         description=(
@@ -293,6 +301,8 @@ class CompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.extra_data is not None:
+            extra_args["extra_data"] = self.extra_data
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,

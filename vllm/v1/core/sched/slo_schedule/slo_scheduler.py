@@ -15,13 +15,14 @@ try:
     from .sarathi_scheduler import SarathiScheduler
     from .qoserve_scheduler import QoServeScheduler
     from .config import SloSchedulerConfig
-except ImportError:
+except ImportError as e:
     from fixed_scheduler import FixedScheduler
     from random_scheduler import RandomScheduler
     from multislo_scheduler import MultiSloScheduler
     from sarathi_scheduler import SarathiScheduler
     from qoserve_scheduler import QoServeScheduler
     from config import SloSchedulerConfig
+    logger.warning("Slo scheduler not available aaa : %s", e)
 
 # 调度器映射
 scheduler_cls = {
@@ -41,7 +42,7 @@ class SloScheduler:
             self.scheduler = scheduler_cls.get(self.sched_mode)()
         except TypeError:
             logger.error("Scheduler mode %s init failed", self.sched_mode)
-            self.sched_mode = "fixed_chunk"
+            self.sched_mode = "fixed-chunk"
             self.scheduler = scheduler_cls.get(self.sched_mode)()
             
     def get_status(self) -> dict:

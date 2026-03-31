@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
+import os
+import threading
+import time
+from queue import Empty, Queue
+from typing import Any, Optional
+from datetime import datetime
+
 import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Any
 
 import numpy as np
 
@@ -59,6 +66,13 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+try:
+    from .slo_schedule import SloScheduler
+    from .slo_schedule import SloLogger
+    SLO_SCHEDULER_AVAILABLE = True
+except ImportError as e:
+    logger.warning("Slo scheduler not available: %s", e)
+    SLO_SCHEDULER_AVAILABLE = False
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -269,6 +283,51 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+                # 初始化
+        self._initialize()
+        
+    def _initialize(self):
+        # Batch跟踪
+        self.batch_id = 0
+        self.last_sched_end_time: Optional[float] = None
+        self.batch_profiling_data: Optional[dict] = None
+        
+        # Profiling设置 - 仅在启用时创建目录
+        self.enable_profiling = os.getenv(
+            'VLLM_ENABLE_SCHEDULER_PROFILING', 'false').lower() == 'true'
+        self.profiling_log_file: Optional[str] = None
+        self._profiling_queue: Optional[Queue[Optional[str]]] = None
+        self._profiling_writer_stop: Optional[threading.Event] = None
+        self._profiling_writer_thread: Optional[threading.Thread] = None
+        
+        if self.enable_profiling:
+            now = datetime.now()
+            profiling_log_dir = os.getenv(
+                'VLLM_SCHEDULER_PROFILING_LOG', 'profiling')
+            profiling_log_filename = os.getenv(
+                'VLLM_SCHEDULER_PROFILING_LOG_FILENAME', f"profiling_{now.strftime('%Y-%m-%d %H_%M_%S')}.jsonl")
+            date_dir = os.path.join(profiling_log_dir, now.strftime("%Y-%m-%d"))
+            os.makedirs(date_dir, exist_ok=True)
+            self.profiling_log_file = os.path.join(
+                date_dir, profiling_log_filename)
+            logger.info("The VLLM profiling log file: %s", self.profiling_log_file)
+            self._profiling_queue = Queue()
+            self._profiling_writer_stop = threading.Event()
+            self._start_profiling_writer_thread()
+
+        # SLO调度器设置
+        self.slo_scheduler = None
+        if SLO_SCHEDULER_AVAILABLE and os.getenv(
+                'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true':
+            try:
+                self.slo_scheduler = SloScheduler()
+                logger.info("Slo Scheduler initialized successfully!Status:%s", self.slo_scheduler.get_status())
+            except Exception as e:
+                logger.warning("Slo Scheduler initialization failed: %s", e)
+        self.slo_sched = False
+
+        self.slo_logger = SloLogger()
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -331,6 +390,8 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
+        sched_start_time = time.time() 
+
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -342,6 +403,19 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+        
+        assigned = None
+        decode_only = False
+        # 使用Slo调度器
+        if self.slo_scheduler:
+            schedule_decision = self.slo_scheduler.sched_decision(
+                self._schedule_state())
+            token_budget = schedule_decision['token_budget']
+            self.slo_sched = schedule_decision['slo_sched']
+            decode_only = schedule_decision.get('decode_only', False)
+            assigned = schedule_decision.get('assigned', None)
+
+        init_token_budget = token_budget
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -374,12 +448,28 @@ class Scheduler(SchedulerInterface):
                 # partial draft tokens since this prevents uniform decode optimizations.
                 req_index += 1
                 continue
+            
+            # slo-调度器有分配，且当前请求未被分配，不分配该请求
+            if assigned and request.request_id not in assigned:
+                # 不分配该请求
+                req_index += 1
+                continue
 
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+
+            # slo-调度器有分配，且当前请求已被分配，只分配分配给该请求的token
+            if assigned:
+                num_new_tokens = min(num_new_tokens, assigned[request.request_id])
+
+            if decode_only and num_new_tokens > 1 :
+                # 纯解码，跳过prefill请求
+                req_index += 1
+                continue
+            
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
@@ -539,11 +629,22 @@ class Scheduler(SchedulerInterface):
             skipped_waiting_requests = create_request_queue(self.policy)
 
             while self.waiting and token_budget > 0:
+
+                if decode_only:
+                    # 纯解码，跳过prefill请求
+                    break
+        
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
                 request = self.waiting.peek_request()
                 request_id = request.request_id
+
+                if assigned and request_id not in assigned:
+                    # 不分配该请求
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 # KVTransfer: skip request if still waiting for remote kvs.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -907,6 +1008,20 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
+                # Profiling: 记录调度统计信息，但不立即写入文件（等待model run完成）
+        sched_end_time = time.time()
+        self.last_sched_end_time = sched_end_time
+        if self.enable_profiling:
+            self._prepare_schedule_profiling(
+                schedule_duration=sched_end_time - sched_start_time,
+                num_scheduled_tokens=num_scheduled_tokens,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                token_budget=init_token_budget)
+            
+        # 添加吞吐量信息
+        self.slo_logger.add_tokens(total_num_scheduled_tokens - len(self.running))
+
         return scheduler_output
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
@@ -1260,6 +1375,14 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        
+        model_run_duration = time.time() - self.last_sched_end_time
+        # Profiling数据记录
+        # if self.enable_profiling and self.slo_sched:
+        if self.enable_profiling:
+            self._finalize_and_log_profiling(model_run_duration)
+        self.slo_sched = False
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -1312,6 +1435,14 @@ class Scheduler(SchedulerInterface):
                 # be set to None (in order to finish async KV transfer).
                 # In this case, we use is_finished() to check.
                 continue
+
+            # 记录ttft时间
+            if request.ttft is None and num_tokens_scheduled == 1:
+                now_time = time.time()
+                request.ttft = now_time - request.arrival_time
+                if request.ttft < request.ttft_slo:
+                    request.safeguard = True
+
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
@@ -2209,3 +2340,131 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+    
+    def _start_profiling_writer_thread(self) -> None:
+        """启动后台线程，异步写入profiling日志。"""
+        if self._profiling_writer_thread is not None:
+            return
+        self._profiling_writer_thread = threading.Thread(
+            target=self._profiling_writer_loop,
+            name="SchedulerProfilingWriter",
+            daemon=True,
+        )
+        self._profiling_writer_thread.start()
+
+    def _profiling_writer_loop(self) -> None:
+        """后台线程：从队列取出profiling数据并写入文件。"""
+        while not self._profiling_writer_stop.is_set():
+            try:
+                payload = self._profiling_queue.get(timeout=1.0)
+            except Empty:
+                continue
+            if payload is None:
+                break
+            try:
+                with open(self.profiling_log_file, "a", encoding="utf-8") as f:
+                    f.write(payload + "\n")
+            except Exception as e:
+                logger.warning(
+                    "Failed to write profiling data asynchronously: %s", e)
+                
+    def _prepare_schedule_profiling(self, schedule_duration: float,
+                                    num_scheduled_tokens: dict[str, int],
+                                    total_num_scheduled_tokens: int,
+                                    token_budget: float) -> None:
+        """准备调度profiling信息，不写入文件。"""
+        now_time = time.time()
+        # 仅记录当前step中被调度的请求，避免running中未调度请求触发KeyError。
+        scheduled_running = [
+            req for req in self.running if req.request_id in num_scheduled_tokens
+        ]
+
+        chunk_sizes: list[int] = []
+        computed_tokens: list[int] = []
+        cached_tokens: list[int] = []
+        # ttft_list: list[Optional[str]] = []
+        # ttft_slo_list: list[float] = []
+        # remaining_ttft: list[Optional[str]] = []
+        # meet_ttft: list[Optional[str]] = []
+        tbt: list[Optional[str]] = []
+        decode_tokens: list[Optional[int]] = []
+        # max_tokens_list: list[int] = []
+        request_data_id: list[Optional[int]] = []
+
+        # 单次遍历本轮被调度请求
+        for req in scheduled_running:
+            chunk_sizes.append(num_scheduled_tokens[req.request_id])
+            computed_tokens.append(req.num_computed_tokens)
+            cached_tokens.append(req.num_cached_tokens)
+            # ttft_slo_list.append(req.ttft_slo)
+            # max_tokens_list.append(req.max_tokens)
+            request_data_id.append(req.request_data_id)
+            tbt.append(req.tbt)
+
+            req_ttft = req.ttft
+            if req_ttft is not None:
+                # ttft_list.append(f"{req_ttft:.3f}")
+                # meet_ttft.append("T" if req_ttft <= req.ttft_slo else "F")
+                decode_tokens.append(req.num_computed_tokens - req.num_prompt_tokens)
+                # remaining_ttft.append(None)
+            else:
+                # ttft_list.append(None)
+                # remaining_ttft.append(
+                #     f"{req.ttft_slo - (now_time - req.arrival_time):.3f}")
+                # meet_ttft.append(None)
+                decode_tokens.append(None)
+
+        self.batch_profiling_data = {
+            "batch_id": self.batch_id,
+            "time": f"{now_time:.3f}",
+            "token_budget": token_budget,
+            "sched_tokens": total_num_scheduled_tokens,
+            "slo_sched": self.slo_sched,
+            "schedule_ms": f"{schedule_duration * 1000:.3f}",
+            "num_waiting": len(self.waiting),
+            "num_running": len(self.running),
+            "num_scheduled": len(chunk_sizes),
+            "req_data_id": request_data_id,
+            "chunk_sizes": chunk_sizes,
+            "computed_tokens": computed_tokens,
+            "cached_tokens": cached_tokens,
+            # "ttft_slo": ttft_slo_list,
+            # "ttft": ttft_list,
+            # "remaining_ttft": remaining_ttft,
+            # "meet_ttft": meet_ttft,
+            "tbt": tbt,
+            "decode_tokens": decode_tokens,
+            # "max_tokens": max_tokens_list,
+        }
+
+    def _finalize_and_log_profiling(self, model_run_duration: float) -> None:
+        """完成profiling数据并写入文件"""
+
+        # 添加model run时间
+        self.batch_profiling_data[
+            "model_run_ms"] = f"{model_run_duration * 1000:.3f}"
+
+        # 写入日志文件
+        try:
+            payload = json.dumps(self.batch_profiling_data,
+                                    ensure_ascii=False)
+            if self._profiling_writer_thread:
+                self._profiling_queue.put(payload)
+            else:
+                logger.warning("Failed to write profiling data")
+        except Exception as e:
+            logger.warning("Failed to write profiling data: %s", e)
+
+        self.batch_id += 1
+
+    def _schedule_state(self) -> dict:
+        """
+        获取调度信息
+        """
+        return {
+            'running': self.running,
+            'waiting': self.waiting,
+            'current_time': time.time(),
+            'token_budget': self.max_num_scheduled_tokens,
+            'throughput': self.slo_logger.get_throughput(),
+        }

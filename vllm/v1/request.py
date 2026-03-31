@@ -177,6 +177,24 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # 添加额外的属性
+        self._set_other_attribute()
+
+    def _set_other_attribute(self):
+        """
+        设置额外的属性，用于调度
+        """
+        self.arrival_time = time.time()
+        if self.sampling_params.extra_args:
+            self.extra_data = self.sampling_params.extra_args.get('extra_data', None)
+            if self.extra_data:
+                self.arrival_time = self.extra_data.get('arrival_time', None)
+                self.ttft_slo = self.extra_data.get('ttft_slo', None)
+                self.request_data_id = self.extra_data.get('request_data_id', None)
+                self.tbt = self.extra_data.get('tbt', None)
+        self.ttft = None
+        self.safeguard = False
+
     @property
     @deprecated(
         "Request.eos_token_id will be removed in v0.18. "

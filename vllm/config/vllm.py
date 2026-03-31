@@ -742,7 +742,8 @@ class VllmConfig:
                 )
                 self.scheduler_config.async_scheduling = False
             else:
-                self.scheduler_config.async_scheduling = True
+                # self.scheduler_config.async_scheduling = True
+                self.scheduler_config.async_scheduling = False
 
         logger.info_once(
             "Asynchronous scheduling is %s.",
