@@ -14,6 +14,7 @@ try:
     from .multislo_scheduler import MultiSloScheduler
     from .sarathi_scheduler import SarathiScheduler
     from .qoserve_scheduler import QoServeScheduler
+    from .sliding_scheduler import SlidingScheduler
     from .config import SloSchedulerConfig
 except ImportError as e:
     from fixed_scheduler import FixedScheduler
@@ -21,6 +22,7 @@ except ImportError as e:
     from multislo_scheduler import MultiSloScheduler
     from sarathi_scheduler import SarathiScheduler
     from qoserve_scheduler import QoServeScheduler
+    from sliding_scheduler import SlidingScheduler
     from config import SloSchedulerConfig
     logger.warning("Slo scheduler not available aaa : %s", e)
 
@@ -31,6 +33,7 @@ scheduler_cls = {
         "multislo": MultiSloScheduler,
         "fixed-chunk": FixedScheduler,
         "qoserve": QoServeScheduler,
+        "sliding-chunk": SlidingScheduler,
     }
 
 class SloScheduler:
