@@ -14,6 +14,7 @@ try:
     from .multislo_scheduler import MultiSloScheduler
     from .sarathi_scheduler import SarathiScheduler
     from .qoserve_scheduler import QoServeScheduler
+    from .sliding_scheduler import SlidingScheduler
     from .config import SloSchedulerConfig
 except ImportError:
     from fixed_scheduler import FixedScheduler
@@ -21,6 +22,7 @@ except ImportError:
     from multislo_scheduler import MultiSloScheduler
     from sarathi_scheduler import SarathiScheduler
     from qoserve_scheduler import QoServeScheduler
+    from sliding_scheduler import SlidingScheduler
     from config import SloSchedulerConfig
 
 # 调度器映射
@@ -30,6 +32,7 @@ scheduler_cls = {
         "multislo": MultiSloScheduler,
         "fixed-chunk": FixedScheduler,
         "qoserve": QoServeScheduler,
+        "sliding": SlidingScheduler,
     }
 
 class SloScheduler:
