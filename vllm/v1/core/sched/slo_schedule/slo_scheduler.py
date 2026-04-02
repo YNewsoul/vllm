@@ -15,6 +15,7 @@ try:
     from .sarathi_scheduler import SarathiScheduler
     from .qoserve_scheduler import QoServeScheduler
     from .sliding_scheduler import SlidingScheduler
+    from .min_max_scheduler import MinMaxScheduler
     from .config import SloSchedulerConfig
 except ImportError as e:
     from fixed_scheduler import FixedScheduler
@@ -23,6 +24,7 @@ except ImportError as e:
     from sarathi_scheduler import SarathiScheduler
     from qoserve_scheduler import QoServeScheduler
     from sliding_scheduler import SlidingScheduler
+    from min_max_scheduler import MinMaxScheduler
     from config import SloSchedulerConfig
     logger.warning("Slo scheduler not available aaa : %s", e)
 
@@ -34,6 +36,7 @@ scheduler_cls = {
         "fixed-chunk": FixedScheduler,
         "qoserve": QoServeScheduler,
         "sliding-chunk": SlidingScheduler,
+        "min-max": MinMaxScheduler,
     }
 
 class SloScheduler:
