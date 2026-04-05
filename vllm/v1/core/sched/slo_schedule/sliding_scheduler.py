@@ -6,27 +6,36 @@ try:
     from .config import SloSchedulerConfig
     from .batch_forwarder import BatchForwarder
     from .multislo_predictor import MultiSloPredictor
+    from .sliding_utils import select_dp_batch_decision
     from .utils import convert_req_to_snapshot, ReqSnapshot
 except ImportError:
     from config import SloSchedulerConfig
     from batch_forwarder import BatchForwarder
     from multislo_predictor import MultiSloPredictor
+    from sliding_utils import select_dp_batch_decision
     from utils import convert_req_to_snapshot, ReqSnapshot
 
 
 class SlidingScheduler:
     def __init__(self):
+        # 从环境变量加载调度器参数（模型名、阈值等）。
         self.config = SloSchedulerConfig.from_env()
 
         self.predictor_model = self.config.predictor_model
         current_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(current_dir, "models", self.predictor_model)
+        # urgency 阈值用于 prefill/waiting 重排时的紧急度判断。
         self.__alpha = self.config.multislo_urgency_threshold
+        # 统一通过 BatchForwarder + predictor 评估不同预算下的迭代时长。
         self.batch_forwarder = BatchForwarder(predictor=MultiSloPredictor.load(model_path))
     
     def schedule(self, sched_state: dict) -> dict:
         """
-        调用调度器执行调度决策
+        Sliding 调度主流程：
+        1) 组装请求快照并重排 prefill/waiting；
+        2) 先尝试“直接用当前 token_budget”；
+        3) 若超出时延约束，计算 max/next 窗口预算；
+        4) 先走 DP 修正（处理 TTFT 风险），否则走两窗口总时长最优搜索
         """
         decoding = sched_state['decoding']
         prefilling = sched_state['prefilling']
@@ -49,7 +58,7 @@ class SlidingScheduler:
 
         current_time = sched_state['current_time']
 
-        # Step 2:优先级排序
+        # Step 2: prefill/waiting 优先级排序（将两队列合并后统一排序）。
         if len(prefilling_snapshots) + len(waiting_snapshots) >=2:
             prefilling_snapshots, waiting_snapshots = (
                 self._reorder_prefill_waiting_by_priority(
@@ -58,12 +67,15 @@ class SlidingScheduler:
                     now=current_time,
                     throughput=sched_state['throughput']))
 
-        # Step 3: 先进行一次最大tokenbudget的PD融合计算
-        iter_ms, assigned = self.batch_forwarder.forward(decoding_snapshots,prefilling_snapshots,
-                                                         waiting_snapshots,token_budget)
+        # Step 3: 先在给定 token_budget 下评估一次，判断是否已满足窗口约束。
+        iter_ms, assigned = self.batch_forwarder.forward(
+            decoding=decoding_snapshots,
+            prefilling=prefilling_snapshots,
+            waiting=waiting_snapshots,
+            token_budget=token_budget)
 
-        # Step 4:进行sliding window调度
-        # 4.1 记录当前迭代允许的最大迭代时间和下一个迭代允许的最大时间
+        # Step 4: sliding window 调度
+        # 4.1 计算当前窗口与下一窗口允许的最大迭代时长（秒）。
         max_iter_time = next_max_iter_time = 10
         for req in decoding:
             # 只对需要safeguard的请求进行判断
@@ -74,8 +86,8 @@ class SlidingScheduler:
             max_iter_time = min(max_iter_time, token_slack)
             # 当前请求的 token_slack 可能不是当前最大迭代时间，但其tbt也可能影响下一个最大迭代时间
             next_max_iter_time = min(next_max_iter_time, token_slack - max_iter_time + req.tbt)
-        
-        # 能进行最大tokenbudget融合计算
+
+        # 4.2 若“当前预算下的实际时长”仍在约束内，直接返回当前分配。
         if max_iter_time*1000 > iter_ms:
             return {
                 "decode_only": False,
@@ -83,13 +95,50 @@ class SlidingScheduler:
                 "slo_sched": True,
                 "assigned": assigned,
             }
-        return self._compare_iter(
+        
+        # 4.3 将窗口时长约束映射为预算（前置计算，避免后续重复调用）。
+        cur_max_ms = max_iter_time * 1000.0
+        nxt_max_ms = next_max_iter_time * 1000.0
+        cur_max_budget, _ = self.batch_forwarder.time_to_token_budget(
+            decoding=decoding_snapshots,
+            prefilling=prefilling_snapshots,
+            waiting=waiting_snapshots,
+            target_iter_ms=cur_max_ms,
+        )
+        nxt_max_budget, _ = self.batch_forwarder.time_to_token_budget(
+            decoding=decoding_snapshots,
+            prefilling=prefilling_snapshots,
+            waiting=waiting_snapshots,
+            target_iter_ms=nxt_max_ms,
+        )
+
+        # 4.4 对“当前窗口预算”做 TTFT 风险检查：
+        # 若存在风险，走 DP 方案返回显式 assigned。
+        dp_decision = select_dp_batch_decision(
+            batch_forwarder=self.batch_forwarder,
             decoding=decoding_snapshots,
             prefilling=prefilling_snapshots,
             waiting=waiting_snapshots,
             token_budget=token_budget,
+            cur_max_budget=cur_max_budget,
+            current_time=current_time,
             max_iter_time=max_iter_time,
-            next_max_iter_time=next_max_iter_time,
+        )
+        if dp_decision is not None:
+            return {
+                "decode_only": False,
+                "token_budget": dp_decision["token_budget"],
+                "slo_sched": True,
+                "assigned": dp_decision["assigned"],
+            }
+        # 4.5 无显式风险时，执行两窗口总时长最优预算搜索。
+        return self.select_best_batch_decision(
+            decoding=decoding_snapshots,
+            prefilling=prefilling_snapshots,
+            waiting=waiting_snapshots,
+            token_budget=token_budget,
+            cur_max_budget=cur_max_budget,
+            nxt_max_budget=nxt_max_budget,
         )
 
     def _reorder_prefill_waiting_by_priority(
@@ -99,6 +148,8 @@ class SlidingScheduler:
         now: float,
         throughput: float,
     ) -> tuple[list, list]:
+        # 将 running 中 prefill 与 waiting 合并后统一排序，
+        # 返回格式保持 (prefilling, waiting)；这里全部放回 waiting。
         all_reqs = prefilling_snapshots + waiting_snapshots
 
         def priority_key(req):
@@ -109,42 +160,34 @@ class SlidingScheduler:
 
             safeguard_rank = 0 if bool(req.safeguard) else 1
             urgent_rank = 0 if ratio > self.__alpha else 1
+            # 优先级：safeguard > urgent > remaining_tokens 少者优先。
             return (safeguard_rank, urgent_rank, remaining_tokens)
 
         ordered_waiting = sorted(all_reqs, key=priority_key)
         return [], ordered_waiting
     
-    def _compare_iter(
+    def select_best_batch_decision(
         self, 
         decoding: List[ReqSnapshot],
         prefilling: List[ReqSnapshot],
         waiting: List[ReqSnapshot],
         token_budget: int = 2048,
-        max_iter_time: float = 1, 
-        next_max_iter_time: float = 1
+        cur_max_budget: int = 1,
+        nxt_max_budget: int = 1,
     ) -> dict:
-        cur_max_ms = max_iter_time * 1000.0
-        nxt_max_ms = next_max_iter_time * 1000.0
-
-        cur_max_budget, _ = self.batch_forwarder.time_to_token_budget(
-            decoding=decoding,
-            prefilling=prefilling,
-            waiting=waiting,
-            target_iter_ms=cur_max_ms,
-        )
-        nxt_max_budget, _ = self.batch_forwarder.time_to_token_budget(
-            decoding=decoding,
-            prefilling=prefilling,
-            waiting=waiting,
-            target_iter_ms=nxt_max_ms,
-        )
-
+        """
+        在 [len(decoding), token_budget] 的预算区间内，
+        近似寻找“当前窗口 + 下一窗口”总时长最小的预算。
+        """
+        # 两个窗口预算之和固定，搜索的是当前窗口分到多少预算。
         total_budget = cur_max_budget + nxt_max_budget
 
+        # 当前窗口预算下界至少覆盖 decoding（每个 decode 1 token）。
         left = len(decoding)
         right = token_budget
 
         def _internal_eval_budget(budget: int) -> tuple[float, dict[str, int] | None]:
+            # 评估单个预算下的一次迭代时长与分配结果。
             iter_ms, assigned = self.batch_forwarder.forward(
                 decoding=decoding,
                 prefilling=prefilling,
@@ -154,13 +197,14 @@ class SlidingScheduler:
             return iter_ms, assigned
 
         def _internal_total_ms(cur_budget: int) -> tuple[float, dict[str, int] | None]:
+            # 由总预算推导下一窗口预算，目标最小化两窗口总时长。
             nxt_budget = total_budget - cur_budget
             cur_ms, cur_assigned = _internal_eval_budget(cur_budget)
             nxt_ms, _ = _internal_eval_budget(nxt_budget)
             return cur_ms + nxt_ms, cur_assigned
 
-        # 离散三分：在预算空间上搜索最小总耗时
-        # 同时保留边界检查，覆盖单调情况下“最优在边界”的情形。
+        # 离散三分：在预算空间上快速逼近最小总耗时点。
+        # 后续仍会做边界检查，避免“最优在边界”被漏掉。
         origin_left = left
         origin_right = right
         while right - left > 30:
@@ -174,7 +218,7 @@ class SlidingScheduler:
                 left = mid_left + 1
 
 
-        # 边界条件对比：覆盖单调函数时最优在边界的情况
+        # 边界条件对比：覆盖单调或近单调情况下“最优在边界”的情形。
         best_budget = origin_left
         best_total_ms, best_assigned = _internal_total_ms(origin_left)
 
@@ -187,7 +231,7 @@ class SlidingScheduler:
             best_budget = origin_right
             best_assigned = right_assigned
 
-        # 取三分搜索的中间值
+        # 取三分收敛后区间中点作为候选，再和边界做比较。
         ternary_budget = (left + right) // 2
         ternary_total_ms, ternary_assigned = _internal_total_ms(ternary_budget)
         if (

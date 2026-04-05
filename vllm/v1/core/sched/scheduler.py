@@ -1440,8 +1440,8 @@ class Scheduler(SchedulerInterface):
             if request.ttft is None and num_tokens_scheduled == 1:
                 now_time = time.time()
                 request.ttft = now_time - request.arrival_time
-                if request.ttft < request.ttft_slo:
-                    request.safeguard = True
+                if request.ttft > request.ttft_slo:
+                    request.safeguard = False
 
 
             req_index = model_runner_output.req_id_to_index[req_id]
@@ -1638,6 +1638,12 @@ class Scheduler(SchedulerInterface):
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
+
+        # 更新waiting请求的safeguard状态
+        now_time = time.time()
+        for req in self.waiting:
+            if now_time - req.arrival_time > req.ttft_slo:
+                req.safeguard = False
 
         return engine_core_outputs
 
