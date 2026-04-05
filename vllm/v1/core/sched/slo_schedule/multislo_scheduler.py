@@ -68,17 +68,18 @@ class MultiSloScheduler:
 
         # Step 4:判断是否需要 decode only
         # 记录当前最小迭代时间和下一个最小迭代时间
-        min_iter_time = next_min_iter_time = 1
+        max_iter_time = next_max_iter_time = 10
         for req in decoding:
             # 只对需要safeguard的请求进行判断
             if not req.safeguard:
                 continue
             decoded_tokens = max(0, req.num_computed_tokens - req.num_prompt_tokens)
             token_slack = req.arrival_time + req.ttft_slo + decoded_tokens*req.tbt - current_time
-            min_iter_time = min(min_iter_time, token_slack)
-            next_min_iter_time = min(next_min_iter_time, token_slack - min_iter_time + req.tbt)
+            max_iter_time = min(max_iter_time, token_slack)
+            # 当前请求的 token_slack 可能不是当前最大迭代时间，但其tbt也可能影响下一个最大迭代时间
+            next_max_iter_time = min(next_max_iter_time, token_slack - max_iter_time + req.tbt)
             
-        if min_iter_time*1000 > iter_ms:
+        if max_iter_time*1000 > iter_ms:
             return {
                 "decode_only": False,
                 "token_budget": token_budget,
@@ -90,8 +91,8 @@ class MultiSloScheduler:
             prefilling=prefilling_snapshots,
             waiting=waiting_snapshots,
             token_budget=token_budget,
-            min_iter_time=min_iter_time,
-            next_min_iter_time=next_min_iter_time,
+            max_iter_time=max_iter_time,
+            next_max_iter_time=next_max_iter_time,
         )
 
     def _reorder_prefill_waiting_by_priority(
@@ -122,22 +123,22 @@ class MultiSloScheduler:
         prefilling: List[ReqSnapshot],
         waiting: List[ReqSnapshot],
         token_budget: int = 2048,
-        min_iter_time: float = 1, 
-        next_min_iter_time: float = 1
+        max_iter_time: float = 10, 
+        next_max_iter_time: float = 10
     ) -> dict:
         # 当前的token budget
         cur_token_budget, _ = self.batch_forwarder.time_to_token_budget(
             decoding=decoding,
             prefilling=prefilling,
             waiting=waiting,
-            target_iter_ms=min_iter_time*1000,
+            target_iter_ms=max_iter_time*1000,
         )
         # 下一个迭代时间的token budget
         next_token_budget, _ = self.batch_forwarder.time_to_token_budget(
             decoding=decoding,
             prefilling=prefilling,
             waiting=waiting,
-            target_iter_ms=next_min_iter_time*1000,
+            target_iter_ms=next_max_iter_time*1000,
         )
         # 纯解码的迭代时间
         num_decoding = len(decoding)
@@ -155,7 +156,7 @@ class MultiSloScheduler:
             token_budget=cur_token_budget + next_token_budget - num_decoding,
             return_assigned=False,
         )
-        if decode_only_iter_ms + next_iter_ms < (min_iter_time + next_min_iter_time)*1000:
+        if decode_only_iter_ms + next_iter_ms < (max_iter_time + next_max_iter_time)*1000:
             return {
             "decode_only": True,
             "token_budget": token_budget,

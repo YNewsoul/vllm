@@ -105,7 +105,7 @@ class Request:
                 self.request_data_id = self.extra_data.get('request_data_id', None)
                 self.tbt = self.extra_data.get('tbt', None)
         self.ttft = None
-        self.safeguard = False
+        self.safeguard = True
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
