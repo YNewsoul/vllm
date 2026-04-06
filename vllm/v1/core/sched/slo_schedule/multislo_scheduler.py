@@ -2,16 +2,24 @@ import os
 
 from typing import List
 
+from vllm.logger import init_logger
+
 try:
     from .config import SloSchedulerConfig
     from .batch_forwarder import BatchForwarder
     from .multislo_predictor import MultiSloPredictor
+    from .multislo_online_trainer import (MultiSloOnlineTrainConfig,
+                                          MultiSloOnlineTrainer)
     from .utils import convert_req_to_snapshot, ReqSnapshot
 except ImportError:
     from config import SloSchedulerConfig
     from batch_forwarder import BatchForwarder
     from multislo_predictor import MultiSloPredictor
+    from multislo_online_trainer import (MultiSloOnlineTrainConfig,
+                                         MultiSloOnlineTrainer)
     from utils import convert_req_to_snapshot, ReqSnapshot
+
+logger = init_logger(__name__)
 
 
 class MultiSloScheduler:
@@ -22,7 +30,37 @@ class MultiSloScheduler:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(current_dir, "models", self.predictor_model)
         self.__alpha = self.config.multislo_urgency_threshold
-        self.batch_forwarder = BatchForwarder(predictor=MultiSloPredictor.load(model_path))
+        predictor = MultiSloPredictor.load(model_path)
+
+        self.online_trainer: MultiSloOnlineTrainer | None = None
+        if self.config.online_train_enabled:
+            online_cfg = MultiSloOnlineTrainConfig(
+                enabled=True,
+                buffer_size=self.config.online_buffer_size,
+                warmup_samples=self.config.online_warmup_samples,
+                retrain_interval=self.config.online_retrain_interval,
+                l2=self.config.online_l2,
+                use_scene_models=self.config.online_use_scene_models,
+                min_scene_samples=self.config.online_min_scene_samples,
+                min_ms=self.config.online_min_ms,
+                save_path=self.config.online_save_path,
+                ingest_queue_size=self.config.online_ingest_queue_size,
+            )
+            self.online_trainer = MultiSloOnlineTrainer(
+                initial_predictor=predictor,
+                config=online_cfg,
+            )
+            predictor_for_forward = self.online_trainer
+            logger.info(
+                "MultiSlo online training enabled: warmup=%d interval=%d buffer=%d",
+                online_cfg.warmup_samples,
+                online_cfg.retrain_interval,
+                online_cfg.buffer_size,
+            )
+        else:
+            predictor_for_forward = predictor
+
+        self.batch_forwarder = BatchForwarder(predictor=predictor_for_forward)
     
     def schedule(self, sched_state: dict) -> dict:
         """
@@ -161,11 +199,25 @@ class MultiSloScheduler:
             "decode_only": True,
             "token_budget": token_budget,
             "slo_sched": True,
+            "sched_method": "multislo-do",
             "assigned": None,
+            "max_iter_time": decode_only_iter_ms,
         }
         return {
             "decode_only": False,
             "token_budget": cur_token_budget,
             "slo_sched": True,
+            "sched_method": "multislo",
             "assigned": None,
+            "max_iter_time":max_iter_time,
         }
+
+    def should_capture_runtime_record(self) -> bool:
+        if self.online_trainer is None:
+            return False
+        return self.online_trainer.should_capture_runtime_record()
+
+    def observe_record(self, record: dict) -> None:
+        if self.online_trainer is None:
+            return
+        self.online_trainer.observe_record(record)

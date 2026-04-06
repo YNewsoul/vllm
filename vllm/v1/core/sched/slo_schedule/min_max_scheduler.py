@@ -40,5 +40,6 @@ class MinMaxScheduler:
             "decode_only": False,
             "token_budget": token_budget,
             "slo_sched": True,
+            "sched_method": "min-max",
             "assigned": None,
         }

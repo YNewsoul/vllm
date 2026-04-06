@@ -28,7 +28,9 @@ except ImportError:
 # 调度器映射
 scheduler_cls = {
         "random-chunk": RandomScheduler,
-        "sarathi": SarathiScheduler,
+        "sarathi-fcfs": SarathiScheduler,
+        "sarathi-edf": SarathiScheduler,
+        "sarathi-srpf": SarathiScheduler,
         "multislo": MultiSloScheduler,
         "fixed-chunk": FixedScheduler,
         "qoserve": QoServeScheduler,
@@ -48,9 +50,12 @@ class SloScheduler:
             self.scheduler = scheduler_cls.get(self.sched_mode)()
             
     def get_status(self) -> dict:
-        return {
-            "schedule_mode": self.sched_mode
-        }
+        status = {"schedule_mode": self.sched_mode}
+        if hasattr(self.scheduler, "should_capture_runtime_record"):
+            status["capture_runtime_record"] = (
+                self.scheduler.should_capture_runtime_record()
+            )
+        return status
     
     def sched_decision(self, sched_state: dict) -> dict:
 
@@ -65,6 +70,7 @@ class SloScheduler:
                 "decode_only": False,
                 "token_budget": sched_state["token_budget"],
                 "slo_sched": False,
+                "sched_method": "default",
                 "assigned":None}
         
         # Step 2: 更新sched_state,包含更细的划分
@@ -72,6 +78,11 @@ class SloScheduler:
 
         # Step 3:调用调度器执行调度决策
         return self.scheduler.schedule(sched_state)
+
+    def observe_record(self, record: dict) -> None:
+        fn = getattr(self.scheduler, "observe_record", None)
+        if callable(fn):
+            fn(record)
 
     def _sched_estimate(self, running: list, waiting: list):
         """判断是否需要进行chunk size调整调度"""

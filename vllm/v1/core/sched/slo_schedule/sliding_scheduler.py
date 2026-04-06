@@ -2,18 +2,26 @@ import os
 
 from typing import List
 
+from vllm.logger import init_logger
+
 try:
     from .config import SloSchedulerConfig
     from .batch_forwarder import BatchForwarder
     from .multislo_predictor import MultiSloPredictor
+    from .multislo_online_trainer import (MultiSloOnlineTrainConfig,
+                                          MultiSloOnlineTrainer)
     from .sliding_utils import select_dp_batch_decision
     from .utils import convert_req_to_snapshot, ReqSnapshot
 except ImportError:
     from config import SloSchedulerConfig
     from batch_forwarder import BatchForwarder
     from multislo_predictor import MultiSloPredictor
+    from multislo_online_trainer import (MultiSloOnlineTrainConfig,
+                                         MultiSloOnlineTrainer)
     from sliding_utils import select_dp_batch_decision
     from utils import convert_req_to_snapshot, ReqSnapshot
+
+logger = init_logger(__name__)
 
 
 class SlidingScheduler:
@@ -26,8 +34,36 @@ class SlidingScheduler:
         model_path = os.path.join(current_dir, "models", self.predictor_model)
         # urgency 阈值用于 prefill/waiting 重排时的紧急度判断。
         self.__alpha = self.config.multislo_urgency_threshold
+        predictor = MultiSloPredictor.load(model_path)
+        self.online_trainer: MultiSloOnlineTrainer | None = None
+        if self.config.online_train_enabled:
+            online_cfg = MultiSloOnlineTrainConfig(
+                enabled=True,
+                buffer_size=self.config.online_buffer_size,
+                warmup_samples=self.config.online_warmup_samples,
+                retrain_interval=self.config.online_retrain_interval,
+                l2=self.config.online_l2,
+                use_scene_models=self.config.online_use_scene_models,
+                min_scene_samples=self.config.online_min_scene_samples,
+                min_ms=self.config.online_min_ms,
+                save_path=self.config.online_save_path,
+                ingest_queue_size=self.config.online_ingest_queue_size,
+            )
+            self.online_trainer = MultiSloOnlineTrainer(
+                initial_predictor=predictor,
+                config=online_cfg,
+            )
+            predictor_for_forward = self.online_trainer
+            logger.info(
+                "Sliding online training enabled: warmup=%d interval=%d buffer=%d",
+                online_cfg.warmup_samples,
+                online_cfg.retrain_interval,
+                online_cfg.buffer_size,
+            )
+        else:
+            predictor_for_forward = predictor
         # 统一通过 BatchForwarder + predictor 评估不同预算下的迭代时长。
-        self.batch_forwarder = BatchForwarder(predictor=MultiSloPredictor.load(model_path))
+        self.batch_forwarder = BatchForwarder(predictor=predictor_for_forward)
     
     def schedule(self, sched_state: dict) -> dict:
         """
@@ -93,7 +129,9 @@ class SlidingScheduler:
                 "decode_only": False,
                 "token_budget": token_budget,
                 "slo_sched": True,
+                "sched_method": "sliding",
                 "assigned": assigned,
+                "max_iter_time": max_iter_time,
             }
         
         # 4.3 将窗口时长约束映射为预算（前置计算，避免后续重复调用）。
@@ -129,7 +167,9 @@ class SlidingScheduler:
                 "decode_only": False,
                 "token_budget": dp_decision["token_budget"],
                 "slo_sched": True,
+                "sched_method": "sliding-dp",
                 "assigned": dp_decision["assigned"],
+                "max_iter_time": max_iter_time,
             }
         # 4.5 无显式风险时，执行两窗口总时长最优预算搜索。
         return self.select_best_batch_decision(
@@ -246,5 +286,17 @@ class SlidingScheduler:
             "decode_only": False,
             "token_budget": best_budget,
             "slo_sched": True,
+            "sched_method": "sliding-dc",
             "assigned": best_assigned,
+            "max_iter_time": best_total_ms,
         }
+
+    def should_capture_runtime_record(self) -> bool:
+        if self.online_trainer is None:
+            return False
+        return self.online_trainer.should_capture_runtime_record()
+
+    def observe_record(self, record: dict) -> None:
+        if self.online_trainer is None:
+            return
+        self.online_trainer.observe_record(record)

@@ -19,5 +19,6 @@ class FixedScheduler:
             "decode_only": False,
             "token_budget": token_budget,
             "slo_sched": True,
+            "sched_method": "fixed-chunk",
             "assigned": None,
         }

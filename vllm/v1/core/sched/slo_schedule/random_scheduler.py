@@ -27,6 +27,7 @@ class RandomScheduler:
             "decode_only": token_budget == self._decode_threshold,
             "token_budget": token_budget,
             "slo_sched": True,
+            "sched_method": "random",
             "assigned": None,
         }
 
@@ -36,5 +37,6 @@ class RandomScheduler:
             "decode_only": token_budget <= self._decode_threshold,
             "token_budget": token_budget,
             "slo_sched": True,
+            "sched_method": "random",
             "assigned": None,
         }

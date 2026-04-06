@@ -24,6 +24,7 @@ def select_dp_batch_decision(
     返回格式：
     - token_budget: 建议本轮使用的总预算（含 decoding 的 1-token 预算）
     - assigned: 每个 request_id 对应的分配 token 数
+    - selected_slack: 最终选中的 DP 方案 slack（秒）
     """
 
     # 预算必须满足：至少覆盖 decoding，且不超过外部传入 token_budget。
@@ -83,6 +84,7 @@ def select_dp_batch_decision(
         return {
             "token_budget": cur_max_budget,
             "assigned": cur_max_assigned,
+            "max_iter_time": max_iter_time,
         }
 
     # 按 ddl（slack）升序，越靠前越紧急。
@@ -98,6 +100,7 @@ def select_dp_batch_decision(
     best_value = float("-inf")
     best_budget = cur_max_budget
     best_assigned = cur_max_assigned
+    best_slack = max_iter_time
 
     # 以每个请求的 ddl 作为一个“锚点时间”：
     # 对应一个预算上限，再在该上限下做组合优化。
@@ -212,6 +215,7 @@ def select_dp_batch_decision(
             best_value = selected_value
             best_budget = used_budget
             best_assigned = candidate_assigned
+            best_total_ms = anchor_slack * 1000.0
 
     # 若所有锚点都无法产出可行方案，则返回 None 让上层兜底。
     if best_assigned is None:
@@ -219,4 +223,5 @@ def select_dp_batch_decision(
     return {
         "token_budget": best_budget,
         "assigned": best_assigned,
+        "max_iter_time": best_total_ms,
     }

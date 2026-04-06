@@ -1,15 +1,24 @@
 import os
 
+from vllm.logger import init_logger
+
 try:
     from .config import SloSchedulerConfig
     from .batch_forwarder import BatchForwarder
     from .multislo_predictor import MultiSloPredictor
+    from .multislo_online_trainer import (MultiSloOnlineTrainConfig,
+                                          MultiSloOnlineTrainer)
     from .utils import convert_req_to_snapshot
 except ImportError:
     from config import SloSchedulerConfig
     from batch_forwarder import BatchForwarder
     from multislo_predictor import MultiSloPredictor
+    from multislo_online_trainer import (MultiSloOnlineTrainConfig,
+                                         MultiSloOnlineTrainer)
     from utils import convert_req_to_snapshot
+
+logger = init_logger(__name__)
+
 
 class SarathiScheduler:
     def __init__(self):
@@ -17,8 +26,38 @@ class SarathiScheduler:
         self.predictor_model = self.config.predictor_model
         current_dir = os.path.dirname(os.path.abspath(__file__))
         model_path = os.path.join(current_dir, "models", self.predictor_model)
-        self.sarathi_mode = self.config.sarathi_mode
-        self.batch_forwarder = BatchForwarder(predictor=MultiSloPredictor.load(model_path))
+        self.sarathi_mode = self.config.sched_mode
+        predictor = MultiSloPredictor.load(model_path)
+
+        self.online_trainer: MultiSloOnlineTrainer | None = None
+        if self.config.online_train_enabled:
+            online_cfg = MultiSloOnlineTrainConfig(
+                enabled=True,
+                buffer_size=self.config.online_buffer_size,
+                warmup_samples=self.config.online_warmup_samples,
+                retrain_interval=self.config.online_retrain_interval,
+                l2=self.config.online_l2,
+                use_scene_models=self.config.online_use_scene_models,
+                min_scene_samples=self.config.online_min_scene_samples,
+                min_ms=self.config.online_min_ms,
+                save_path=self.config.online_save_path,
+                ingest_queue_size=self.config.online_ingest_queue_size,
+            )
+            self.online_trainer = MultiSloOnlineTrainer(
+                initial_predictor=predictor,
+                config=online_cfg,
+            )
+            predictor_for_forward = self.online_trainer
+            logger.info(
+                "Sarathi online training enabled: warmup=%d interval=%d buffer=%d",
+                online_cfg.warmup_samples,
+                online_cfg.retrain_interval,
+                online_cfg.buffer_size,
+            )
+        else:
+            predictor_for_forward = predictor
+
+        self.batch_forwarder = BatchForwarder(predictor=predictor_for_forward)
 
 
     def schedule(self, sched_state: dict) -> dict:
@@ -51,10 +90,10 @@ class SarathiScheduler:
             min_iter_time = min(min_iter_time, req.tbt)
 
         # Step 3:实行EDF或者SRPF调度策略
-        if self.sarathi_mode == "edf":
+        if self.sarathi_mode == "sarathi-edf":
             prefilling_snapshots, waiting_snapshots = (
                 self._sarathi_edf(prefilling_snapshots, waiting_snapshots))
-        elif self.sarathi_mode == "srpf":
+        elif self.sarathi_mode == "sarathi-srpf":
             prefilling_snapshots, waiting_snapshots = (
                 self._sarathi_srpf(prefilling_snapshots, waiting_snapshots))
 
@@ -66,10 +105,20 @@ class SarathiScheduler:
             target_iter_ms=min_iter_time*1000,
         )
 
+        # # 粗暴方式
+        # token_budget = 100 if min_iter_time < 0.05 else 200
+        # _, assigned_tokens = self.batch_forwarder.forward(
+        #         decoding=decoding,
+        #         prefilling=prefilling,
+        #         waiting=waiting,
+        #         token_budget=token_budget,
+        #     )
+
         return {
             "decode_only": False,
             "token_budget": token_budget,
             "slo_sched": True,
+            "sched_method": self.sarathi_mode,
             "assigned": assigned_tokens,
         }
 
@@ -106,3 +155,13 @@ class SarathiScheduler:
 
         ordered = sorted(all_reqs, key=srpf_key)
         return [], ordered
+
+    def should_capture_runtime_record(self) -> bool:
+        if self.online_trainer is None:
+            return False
+        return self.online_trainer.should_capture_runtime_record()
+
+    def observe_record(self, record: dict) -> None:
+        if self.online_trainer is None:
+            return
+        self.online_trainer.observe_record(record)

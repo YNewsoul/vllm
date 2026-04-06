@@ -200,7 +200,7 @@ class Scheduler(SchedulerInterface):
                 'VLLM_SLO_SCHEDULER_ENABLED', 'false').lower() == 'true':
             try:
                 self.slo_scheduler = SloScheduler()
-                logger.info("Slo Scheduler initialized successfully!Status:%s", self.slo_scheduler.get_status())
+                logger.info("Slo Scheduler status:%s", self.slo_scheduler.get_status())
             except Exception as e:
                 logger.warning("Slo Scheduler initialization failed: %s", e)
         self.slo_sched = False
@@ -244,7 +244,8 @@ class Scheduler(SchedulerInterface):
             self.slo_sched = schedule_decision['slo_sched']
             decode_only = schedule_decision.get('decode_only', False)
             assigned = schedule_decision.get('assigned', None)
-
+            max_iter_time = schedule_decision.get('max_iter_time', None)
+            sched_method = schedule_decision.get('sched_method', None)
         init_token_budget = token_budget
 
         # 编码器相关
@@ -683,7 +684,9 @@ class Scheduler(SchedulerInterface):
                 schedule_duration=sched_end_time - sched_start_time,
                 num_scheduled_tokens=num_scheduled_tokens,
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
-                token_budget=init_token_budget)
+                token_budget=init_token_budget,
+                max_iter_time=max_iter_time,
+                sched_method=sched_method)
             
         # 添加吞吐量信息
         self.slo_logger.add_tokens(total_num_scheduled_tokens - len(self.running))
@@ -807,9 +810,8 @@ class Scheduler(SchedulerInterface):
 
         model_run_duration = time.time() - self.last_sched_end_time
 
-        # Profiling数据记录
-        # if self.enable_profiling and self.slo_sched:
-        if self.enable_profiling:
+        # Profiling/在线训练数据记录：在schedule阶段已准备过record时才完成。
+        if self.batch_profiling_data is not None:
             self._finalize_and_log_profiling(model_run_duration)
         self.slo_sched = False
 
@@ -1198,7 +1200,9 @@ class Scheduler(SchedulerInterface):
     def _prepare_schedule_profiling(self, schedule_duration: float,
                                     num_scheduled_tokens: dict[str, int],
                                     total_num_scheduled_tokens: int,
-                                    token_budget: float) -> None:
+                                    token_budget: float,
+                                    max_iter_time: float,
+                                    sched_method: str) -> None:
         """准备调度profiling信息，不写入文件。"""
         now_time = time.time()
         # 仅记录当前step中被调度的请求，避免running中未调度请求触发KeyError。
@@ -1209,13 +1213,8 @@ class Scheduler(SchedulerInterface):
         chunk_sizes: list[int] = []
         computed_tokens: list[int] = []
         cached_tokens: list[int] = []
-        # ttft_list: list[Optional[str]] = []
-        # ttft_slo_list: list[float] = []
-        # remaining_ttft: list[Optional[str]] = []
-        # meet_ttft: list[Optional[str]] = []
         tbt: list[Optional[str]] = []
         decode_tokens: list[Optional[int]] = []
-        # max_tokens_list: list[int] = []
         request_data_id: list[Optional[int]] = []
 
         # 单次遍历本轮被调度请求
@@ -1223,22 +1222,13 @@ class Scheduler(SchedulerInterface):
             chunk_sizes.append(num_scheduled_tokens[req.request_id])
             computed_tokens.append(req.num_computed_tokens)
             cached_tokens.append(req.num_cached_tokens)
-            # ttft_slo_list.append(req.ttft_slo)
-            # max_tokens_list.append(req.max_tokens)
             request_data_id.append(req.request_data_id)
             tbt.append(req.tbt)
 
             req_ttft = req.ttft
             if req_ttft is not None:
-                # ttft_list.append(f"{req_ttft:.3f}")
-                # meet_ttft.append("T" if req_ttft <= req.ttft_slo else "F")
                 decode_tokens.append(req.num_computed_tokens - req.num_prompt_tokens)
-                # remaining_ttft.append(None)
             else:
-                # ttft_list.append(None)
-                # remaining_ttft.append(
-                #     f"{req.ttft_slo - (now_time - req.arrival_time):.3f}")
-                # meet_ttft.append(None)
                 decode_tokens.append(None)
 
         self.batch_profiling_data = {
@@ -1247,6 +1237,8 @@ class Scheduler(SchedulerInterface):
             "token_budget": token_budget,
             "sched_tokens": total_num_scheduled_tokens,
             "slo_sched": self.slo_sched,
+            "sched_method": sched_method,
+            "max_iter_time": max_iter_time,
             "schedule_ms": f"{schedule_duration * 1000:.3f}",
             "num_waiting": len(self.waiting),
             "num_running": len(self.running),
@@ -1255,34 +1247,39 @@ class Scheduler(SchedulerInterface):
             "chunk_sizes": chunk_sizes,
             "computed_tokens": computed_tokens,
             "cached_tokens": cached_tokens,
-            # "ttft_slo": ttft_slo_list,
-            # "ttft": ttft_list,
-            # "remaining_ttft": remaining_ttft,
-            # "meet_ttft": meet_ttft,
             "tbt": tbt,
             "decode_tokens": decode_tokens,
-            # "max_tokens": max_tokens_list,
         }
 
     def _finalize_and_log_profiling(self, model_run_duration: float) -> None:
         """完成profiling数据并写入文件"""
+        if self.batch_profiling_data is None:
+            return
 
         # 添加model run时间
         self.batch_profiling_data[
             "model_run_ms"] = f"{model_run_duration * 1000:.3f}"
 
-        # 写入日志文件
-        try:
-            payload = json.dumps(self.batch_profiling_data,
-                                    ensure_ascii=False)
-            if self._profiling_writer_thread:
-                self._profiling_queue.put(payload)
-            else:
-                logger.warning("Failed to write profiling data")
-        except Exception as e:
-            logger.warning("Failed to write profiling data: %s", e)
+        if self.slo_scheduler is not None:
+            try:
+                self.slo_scheduler.observe_record(self.batch_profiling_data)
+            except Exception as e:
+                logger.warning("Failed to deliver runtime record: %s", e)
+
+        if self.enable_profiling:
+            # 写入日志文件
+            try:
+                payload = json.dumps(self.batch_profiling_data,
+                                        ensure_ascii=False)
+                if self._profiling_writer_thread:
+                    self._profiling_queue.put(payload)
+                else:
+                    logger.warning("Failed to write profiling data")
+            except Exception as e:
+                logger.warning("Failed to write profiling data: %s", e)
 
         self.batch_id += 1
+        self.batch_profiling_data = None
 
     def _schedule_state(self) -> dict:
         """
