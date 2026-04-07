@@ -21,7 +21,7 @@ class SloSchedulerConfig:
     online_use_scene_models: bool = True
     online_min_scene_samples: int = 200
     online_min_ms: float = 0.05
-    online_save_path: str = ""
+    online_save_path: str = "online_model.joblib"
     online_ingest_queue_size: int = 4096
         
     @classmethod
@@ -50,7 +50,7 @@ class SloSchedulerConfig:
             online_use_scene_models = online_use_scene_models,
             online_min_scene_samples = int(os.getenv("VLLM_MULTISLO_ONLINE_MIN_SCENE_SAMPLES", "200")),
             online_min_ms = float(os.getenv("VLLM_MULTISLO_ONLINE_MIN_MS", "0.05")),
-            online_save_path = os.getenv("VLLM_MULTISLO_ONLINE_SAVE_PATH", ""),
+            online_save_path = os.getenv("VLLM_MULTISLO_ONLINE_SAVE_PATH", "online_model.joblib"),
             online_ingest_queue_size = int(os.getenv("VLLM_MULTISLO_ONLINE_INGEST_QUEUE_SIZE", "4096")),
         )
         return config

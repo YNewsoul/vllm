@@ -1,3 +1,4 @@
+import math
 from typing import List
 
 try:
@@ -57,9 +58,7 @@ def select_dp_batch_decision(
     for req_id, assigned_tokens in cur_max_assigned.items():
         if assigned_tokens <= 1:
             continue
-        if req_id not in prefill_slack_by_id:
-            continue
-        if prefill_slack_by_id[req_id] < max_iter_time:
+        if prefill_slack_by_id[req_id] < max_iter_time and assigned_tokens >= prefill_remaining_by_id[req_id]:
             has_risk_prefill = True
             break
 
@@ -67,25 +66,21 @@ def select_dp_batch_decision(
         # 没有风险，返回 None
         return None
 
-    # 候选集合：仅保留仍需 prefill 且 slack > 0 的请求。
+    # 候选集合：仅保留仍需 prefill 且 slack > 0 的已分配请求。
     candidate_items: list[dict[str, float | int | str]] = []
-    for req_id, req in prefill_req_by_id.items():
+    for req_id, assigned_tokens in cur_max_assigned.items():
         slack = prefill_slack_by_id[req_id]
         if slack <= 0:
             continue
         candidate_items.append(
             {
-                "request_id": req.request_id,
+                "request_id": req_id,
                 "remaining": prefill_remaining_by_id[req_id],
                 "slack": slack,
             }
         )
     if not candidate_items:
-        return {
-            "token_budget": cur_max_budget,
-            "assigned": cur_max_assigned,
-            "max_iter_time": max_iter_time,
-        }
+        return None
 
     # 按 ddl（slack）升序，越靠前越紧急。
     candidate_items.sort(key=lambda item: (float(item["slack"]), int(item["remaining"])))
@@ -157,21 +152,30 @@ def select_dp_batch_decision(
         # 在剩余容量上做 0/1 背包：
         # weight = remaining tokens, value = 上述价值函数。
         if remain_capacity > 0 and others:
+            # 容量分桶：将 token 容量轴压缩到约 10 个桶，降低 DP 复杂度。
+            capacity_buckets = min(10, remain_capacity)
+            step = remain_capacity / float(capacity_buckets)
+
             item_count = len(others)
             dp = [
-                [0.0 for _ in range(remain_capacity + 1)]
+                [0.0 for _ in range(capacity_buckets + 1)]
                 for _ in range(item_count + 1)
             ]
             take = [
-                [False for _ in range(remain_capacity + 1)]
+                [False for _ in range(capacity_buckets + 1)]
                 for _ in range(item_count + 1)
             ]
+            item_bucket_weights: list[int] = []
+            for item in others:
+                raw_weight = int(item["remaining"])
+                bucket_weight = max(1, int(math.ceil(raw_weight / step)))
+                item_bucket_weights.append(bucket_weight)
 
             for index in range(1, item_count + 1):
                 item = others[index - 1]
-                item_weight = int(item["remaining"])
+                item_weight = item_bucket_weights[index - 1]
                 item_value = float(item["value"])
-                for cap in range(remain_capacity + 1):
+                for cap in range(capacity_buckets + 1):
                     dp[index][cap] = dp[index - 1][cap]
                     if item_weight <= cap:
                         candidate_value = dp[index - 1][cap - item_weight] + item_value
@@ -179,7 +183,7 @@ def select_dp_batch_decision(
                             dp[index][cap] = candidate_value
                             take[index][cap] = True
 
-            cap = remain_capacity
+            cap = capacity_buckets
             for index in range(item_count, 0, -1):
                 if not take[index][cap]:
                     continue
@@ -187,7 +191,7 @@ def select_dp_batch_decision(
                 req_id = str(item["request_id"])
                 selected_ids.add(req_id)
                 selected_value += float(item["value"])
-                cap -= int(item["remaining"])
+                cap -= item_bucket_weights[index - 1]
 
         selected_count = len(selected_ids)
         # 方案实际占用预算 = decoding 固定预算 + 选中 prefill 的总 remaining。
@@ -215,7 +219,7 @@ def select_dp_batch_decision(
             best_value = selected_value
             best_budget = used_budget
             best_assigned = candidate_assigned
-            best_total_ms = anchor_slack * 1000.0
+            best_slack = anchor_slack
 
     # 若所有锚点都无法产出可行方案，则返回 None 让上层兜底。
     if best_assigned is None:
@@ -223,5 +227,6 @@ def select_dp_batch_decision(
     return {
         "token_budget": best_budget,
         "assigned": best_assigned,
-        "max_iter_time": best_total_ms,
+        "selected_slack": best_slack,
+        "max_iter_time": best_slack,
     }

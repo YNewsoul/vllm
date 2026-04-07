@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 
 import threading
 from queue import Empty, Full, Queue
@@ -170,11 +171,13 @@ class MultiSloOnlineTrainer:
             self._predictor = predictor
             if (self._config.save_path and
                     train_round % self._SAVE_EVERY_SUCCESSFUL_TRAIN_ROUNDS == 0):
-                predictor.save(self._config.save_path)
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                model_path = os.path.join(current_dir, "models", self.save_path)
+                predictor.save(model_path)
                 logger.info(
                     "MultiSlo online model checkpoint saved at round %d: %s",
                     train_round,
-                    self._config.save_path,
+                    model_path,
                 )
             with self._state_lock:
                 self._train_round = train_round
